@@ -1,21 +1,18 @@
-# RGB Calibration Target Generator (MYIROtools XML output)
-# - total colors is final AFTER siblings/permutations, BEFORE WB repeats and padding
-# - neutral count is pure R=G=B
-# - off-gray count = neutrals * multiplier
-# - primary/secondary ramps use same step count as neutrals
-# - scramble print order (seeded)
-# - add extra white patches and extra black patches (each)
-# - pad so that every page has the same number of rows (MYIROtools friendly)
-# - outputs ZIP: colors_print_order.csv, target.cgats.txt, chart_definition.xml, pages_###.tif
+# High-quality RGB printer target generator for MYIROtools (XML + multi-page TIFF + CGATS)
+# - Mandatory-first (neutrals, primaries/secondaries, ramps, off-grey rings)
+# - Gamma 2.2 perceptual-ish spacing for steps
+# - Fill via greedy Poisson-disk / maximin sampling in OKLab (approx, deterministic)
+# - Keep overshoot if it still fits within Max Pages
+# - Scramble print order (seeded), add repeated white/black, pad to full rows-per-page
 
-install.packages(c("shiny", "data.table", "tiff", "zip"))
+suppressPackageStartupMessages({
+  library(shiny)
+  library(data.table)
+  library(tiff)
+  library(zip)
+})
 
-library(shiny)
-library(data.table)
-library(tiff)
-library(zip)
-
-# ---------------- helpers ----------------
+# -------------------- utilities --------------------
 
 clip255 <- function(x) {
   d <- dim(x)
@@ -26,8 +23,8 @@ clip255 <- function(x) {
   y
 }
 
-unique_rgb <- function(mat) {
-  dt <- as.data.table(mat)
+unique_rgb_dt <- function(dt) {
+  dt <- as.data.table(dt)
   setnames(dt, c("R","G","B"))
   dt[, `:=`(R=clip255(R), G=clip255(G), B=clip255(B))]
   unique(dt)
@@ -40,50 +37,62 @@ add_siblings <- function(dt) {
   unique(rbindlist(list(a,b,c)))
 }
 
-even_steps <- function(k) {
+# Gamma-spaced steps including endpoints, unique, length may be <= k if rounding collides (acceptable)
+gamma_steps <- function(k, gamma=2.2) {
   if (k <= 1) return(0L)
-  clip255(round(seq(0, 255, length.out = k)))
+  t <- seq(0, 1, length.out = k)
+  v <- round(255 * (t^(1/gamma)))
+  clip255(unique(v))
 }
 
-make_neutrals <- function(k) {
-  v <- even_steps(k)
+# -------------------- OKLab conversion --------------------
+# sRGB (0..255) -> linear -> OKLab (per Björn Ottosson)
+srgb_to_linear <- function(u01) {
+  # u01 numeric in [0,1]
+  ifelse(u01 <= 0.04045, u01/12.92, ((u01 + 0.055)/1.055)^2.4)
+}
+
+rgb255_to_oklab <- function(rgb) {
+  # rgb: Nx3 integer 0..255 matrix (or length-3 vector)
+  rgb <- as.matrix(rgb)
+  if (is.null(dim(rgb))) rgb <- matrix(rgb, ncol = 3, byrow = TRUE)
+  if (ncol(rgb) != 3) stop("rgb255_to_oklab expects Nx3 input")
+
+  rgb01 <- rgb / 255
+  # clamp without dropping dimensions
+  rgb01[rgb01 < 0] <- 0
+  rgb01[rgb01 > 1] <- 1
+
+  r <- srgb_to_linear(rgb01[,1])
+  g <- srgb_to_linear(rgb01[,2])
+  b <- srgb_to_linear(rgb01[,3])
+
+  # linear sRGB -> LMS
+  l <- 0.4122214708*r + 0.5363325363*g + 0.0514459929*b
+  m <- 0.2119034982*r + 0.6806995451*g + 0.1073969566*b
+  s <- 0.0883024619*r + 0.2817188376*g + 0.6299787005*b
+
+  l_ <- l^(1/3)
+  m_ <- m^(1/3)
+  s_ <- s^(1/3)
+
+  L <- 0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_
+  A <- 1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_
+  B <- 0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_
+
+  cbind(L, A, B)
+}
+
+# -------------------- mandatory set --------------------
+
+make_neutrals <- function(k, gamma=2.2) {
+  v <- gamma_steps(k, gamma=gamma)
   data.table(R=v, G=v, B=v)
 }
 
-# Off-grey: balanced across +/- axes; magnitudes spread 1..delta_max
-make_offgray <- function(neutrals_dt, total_offgray, delta_max) {
-  if (total_offgray <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
-
-  dirs <- rbind(
-    c( 1, 0, 0),
-    c( 0, 1, 0),
-    c( 0, 0, 1),
-    c(-1, 0, 0),
-    c( 0,-1, 0),
-    c( 0, 0,-1)
-  )
-  nd <- nrow(neutrals_dt)
-
-  mags <- unique(clip255(round(seq(1, delta_max, length.out = max(1, min(delta_max, 8))))))
-  if (length(mags) == 0) mags <- 1L
-
-  out <- vector("list", total_offgray)
-  for (i in seq_len(total_offgray)) {
-    base_idx <- ((i - 1) %% nd) + 1
-    dir_idx  <- ((i - 1) %% nrow(dirs)) + 1
-    mag_idx  <- ((i - 1) %% length(mags)) + 1
-
-    base <- as.integer(neutrals_dt[base_idx, .(R,G,B)])
-    d <- dirs[dir_idx, ]
-    m <- mags[mag_idx]
-    rgb <- base + as.integer(d * m)
-
-    out[[i]] <- data.table(R=clip255(rgb[1]), G=clip255(rgb[2]), B=clip255(rgb[3]))
-  }
-  unique(rbindlist(out))
-}
-
-make_hue_ramps <- function(k) {
+make_hue_ramps <- function(k, gamma=2.2) {
+  # ramps with k-ish steps (unique rounding allowed)
+  v <- gamma_steps(k, gamma=gamma) / 255  # 0..1
   hues <- list(
     R = c(255,   0,   0),
     G = c(  0, 255,   0),
@@ -92,46 +101,206 @@ make_hue_ramps <- function(k) {
     M = c(255,   0, 255),
     Y = c(255, 255,   0)
   )
-  t <- seq(0, 1, length.out = k)
 
   out <- list()
   for (h in hues) {
     h <- as.numeric(h)
+
+    # shade: black -> hue
+    shade <- cbind(h[1]*v, h[2]*v, h[3]*v)
+
+    # tint: white -> hue
     tint <- cbind(
-      255 + (h[1] - 255) * t,
-      255 + (h[2] - 255) * t,
-      255 + (h[3] - 255) * t
+      255 + (h[1]-255)*v,
+      255 + (h[2]-255)*v,
+      255 + (h[3]-255)*v
     )
-    shade <- cbind(h[1] * t, h[2] * t, h[3] * t)
-    out[[length(out)+1]] <- as.data.table(tint)
+
     out[[length(out)+1]] <- as.data.table(shade)
+    out[[length(out)+1]] <- as.data.table(tint)
   }
   dt <- rbindlist(out)
   setnames(dt, c("R","G","B"))
-  unique_rgb(as.matrix(dt))
+  unique_rgb_dt(dt)
 }
 
-# Halton fill for remainder
-halton_1d <- function(n, base) {
-  out <- numeric(n)
-  for (i in seq_len(n)) {
-    f <- 1; r <- 0; idx <- i
-    while (idx > 0) {
-      f <- f / base
-      r <- r + f * (idx %% base)
-      idx <- idx %/% base
+make_primaries_secondaries <- function() {
+  data.table(
+    R=c(0,255,0,0,255,255,0,255),
+    G=c(0,0,255,0,0,255,255,255),
+    B=c(0,0,0,255,255,0,255,255)
+  ) |> unique_rgb_dt()
+}
+
+# Off-grey rings: for each neutral v, for each ring magnitude, generate +/- axis offsets
+make_offgrey_rings <- function(neutrals_dt, rings=2L, delta_max=12L) {
+  rings <- as.integer(rings)
+  if (rings <= 0) return(data.table(R=integer(),G=integer(),B=integer()))
+  nd <- nrow(neutrals_dt)
+  if (nd == 0) return(data.table(R=integer(),G=integer(),B=integer()))
+
+  # magnitudes evenly spread
+  mags <- unique(clip255(round(seq(1, delta_max, length.out = rings))))
+  dirs <- rbind(
+    c( 1,0,0), c(0, 1,0), c(0,0, 1),
+    c(-1,0,0), c(0,-1,0), c(0,0,-1)
+  )
+
+  out <- vector("list", nd * length(mags) * nrow(dirs))
+  idx <- 1
+  for (i in seq_len(nd)) {
+    base <- as.integer(neutrals_dt[i, .(R,G,B)])
+    for (m in mags) {
+      for (d in seq_len(nrow(dirs))) {
+        rgb <- base + as.integer(dirs[d,] * m)
+        out[[idx]] <- data.table(R=clip255(rgb[1]), G=clip255(rgb[2]), B=clip255(rgb[3]))
+        idx <- idx + 1
+      }
     }
-    out[i] <- r
   }
-  out
+  unique(rbindlist(out))
 }
-halton_3d <- function(n) cbind(halton_1d(n,2), halton_1d(n,3), halton_1d(n,5))
 
-make_uniform_fill <- function(n) {
-  if (n <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
-  pts <- halton_3d(n)
-  rgb <- clip255(round(pts * 255))
-  unique_rgb(rgb)
+# -------------------- fill: greedy maximin in OKLab --------------------
+# Deterministic given seed.
+# Strategy:
+# 1) Build candidate RGBs via stratified jittered grid + random.
+# 2) Convert to OKLab.
+# 3) Greedy selection maximizing distance to nearest selected (maximin).
+make_fill_poisson_oklab <- function(n_need, seed=12345, candidate_mult=6L, max_candidates=40000L) {
+  n_need <- as.integer(n_need)
+  if (n_need <= 0) return(data.table(R=integer(),G=integer(),B=integer()))
+  set.seed(as.integer(seed))
+
+  # Candidate count
+  n_cand <- min(as.integer(max_candidates), as.integer(n_need * candidate_mult))
+  n_cand <- max(n_cand, min(5000L, max_candidates))
+
+  # Build candidates: mix of jittered grid and random
+  # jittered grid
+  m <- ceiling(n_cand^(1/3))
+  grid_vals <- seq(0, 255, length.out = m)
+  # sample m^3 points without building full cube
+  idxs <- sample.int(m^3, size = min(n_cand, m^3), replace = FALSE)
+  # map linear index -> (i,j,k)
+  i <- ((idxs - 1) %% m) + 1
+  j <- (((idxs - 1) %/% m) %% m) + 1
+  k <- ((idxs - 1) %/% (m*m)) + 1
+  cand <- cbind(grid_vals[i], grid_vals[j], grid_vals[k])
+
+  # add jitter
+  jitter <- matrix(runif(nrow(cand)*3, -0.45, 0.45), ncol=3)
+  step <- if (m > 1) 255/(m-1) else 255
+  cand <- cand + jitter * step
+  cand <- clip255(cand)
+
+  # ensure uniqueness
+  cand_dt <- unique_rgb_dt(as.data.table(cand))
+  cand <- as.matrix(cand_dt[, .(R,G,B)])
+  n_cand <- nrow(cand)
+  if (n_cand < n_need) {
+    # fallback: add pure random candidates
+    extra <- matrix(sample.int(256, size=(n_need - n_cand)*3, replace=TRUE)-1L, ncol=3)
+    cand <- rbind(cand, extra)
+    cand_dt <- unique_rgb_dt(as.data.table(cand))
+    cand <- as.matrix(cand_dt[, .(R,G,B)])
+    n_cand <- nrow(cand)
+  }
+
+  ok <- rgb255_to_oklab(cand)
+
+  # Greedy maximin (maximise distance to nearest selected), without re-selecting the same candidate
+  n_need <- min(n_need, n_cand)
+  sel_idx <- integer(n_need)
+  sel <- rep(FALSE, n_cand)
+
+  sel_idx[1] <- sample.int(n_cand, 1)
+  sel[sel_idx[1]] <- TRUE
+
+  min_d2 <- rowSums((ok - ok[sel_idx[1],])^2)
+  min_d2[sel] <- -Inf
+
+  if (n_need >= 2) {
+    for (s in 2:n_need) {
+      jmax <- which.max(min_d2)
+      if (!is.finite(min_d2[jmax])) break
+
+      sel_idx[s] <- jmax
+      sel[jmax] <- TRUE
+
+      d2 <- rowSums((ok - ok[jmax,])^2)
+      min_d2 <- pmin(min_d2, d2)
+      min_d2[sel] <- -Inf
+    }
+  }
+
+  sel_idx <- sel_idx[sel_idx > 0]
+  fill <- cand[sel_idx, , drop=FALSE]
+  unique_rgb_dt(as.data.table(fill))
+}
+
+# -------------------- layout / paging --------------------
+
+get_page_mm <- function(paper, page_w_mm, page_h_mm) {
+  if (paper == "A3")   return(list(w=297L, h=420L))
+  if (paper == "A3+")  return(list(w=329L, h=483L))  # common 13x19"
+  list(w=as.integer(page_w_mm), h=as.integer(page_h_mm))
+}
+
+compute_grid_paged <- function(page_w_mm, page_h_mm,
+                               patch_mm, gap_mm,
+                               margin_side_mm, margin_leading_mm, margin_trailing_mm,
+                               max_chart_w_mm = 300,
+                               n_patches,
+                               max_pages = 3L) {
+  usable_w_mm <- min(max_chart_w_mm, page_w_mm - 2 * margin_side_mm)
+  usable_h_mm <- page_h_mm - margin_leading_mm - margin_trailing_mm
+  pitch_mm <- patch_mm + gap_mm
+
+  cols <- max(1L, floor((usable_w_mm + gap_mm) / pitch_mm))
+  max_rows_fit <- max(1L, floor((usable_h_mm + gap_mm) / pitch_mm))
+
+  total_rows_needed <- as.integer(ceiling(n_patches / cols))
+  pages_needed <- as.integer(ceiling(total_rows_needed / max_rows_fit))
+  pages <- max(1L, min(as.integer(max_pages), pages_needed))
+
+  if (pages_needed > max_pages) {
+    # won't fit without more pages
+    return(list(fits=FALSE, cols=cols, max_rows_fit=max_rows_fit, pages_needed=pages_needed))
+  }
+
+  rows_per_page <- as.integer(ceiling(total_rows_needed / pages))
+  rows_per_page <- min(rows_per_page, max_rows_fit)
+
+  total_capacity <- cols * rows_per_page * pages
+
+  list(
+    fits=TRUE,
+    cols=cols,
+    rows_per_page=rows_per_page,
+    pages=pages,
+    per_page=cols*rows_per_page,
+    total_capacity=total_capacity,
+    max_rows_fit=max_rows_fit
+  )
+}
+
+pad_to_capacity <- function(dt, capacity, mode=c("alternate","white","black")) {
+  mode <- match.arg(mode)
+  n <- nrow(dt)
+  if (n >= capacity) return(dt)
+  need <- capacity - n
+  pad <- switch(
+    mode,
+    "white" = data.table(R=rep(255L, need), G=rep(255L, need), B=rep(255L, need)),
+    "black" = data.table(R=rep(0L, need),   G=rep(0L, need),   B=rep(0L, need)),
+    "alternate" = {
+      s <- seq_len(need)
+      w <- (s %% 2) == 1
+      data.table(R=ifelse(w,255L,0L), G=ifelse(w,255L,0L), B=ifelse(w,255L,0L))
+    }
+  )
+  rbindlist(list(dt, pad), use.names = TRUE)
 }
 
 add_white_black_repeats <- function(dt, n_each) {
@@ -144,30 +313,13 @@ add_white_black_repeats <- function(dt, n_each) {
   rbindlist(list(dt, wb), use.names = TRUE)
 }
 
-pad_n <- function(n, mode = c("alternate","white","black")) {
-  mode <- match.arg(mode)
-  if (n <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
-  switch(
-    mode,
-    "white" = data.table(R=rep(255L, n), G=rep(255L, n), B=rep(255L, n)),
-    "black" = data.table(R=rep(0L, n),   G=rep(0L, n),   B=rep(0L, n)),
-    "alternate" = {
-      seqs <- seq_len(n)
-      is_white <- seqs %% 2 == 1
-      data.table(
-        R=ifelse(is_white, 255L, 0L),
-        G=ifelse(is_white, 255L, 0L),
-        B=ifelse(is_white, 255L, 0L)
-      )
-    }
-  )
-}
+# -------------------- outputs: CGATS + TIFF pages + MYIRO XML --------------------
 
 write_cgats_rgb <- function(dt, path, title = "RGB_Target_PrintOrder") {
   n <- nrow(dt)
   lines <- c(
     "CGATS.17",
-    paste0("ORIGINATOR\t", "RGB_Generator"),
+    paste0("ORIGINATOR\tRGB_Generator"),
     paste0("DESCRIPTOR\t", title),
     "NUMBER_OF_FIELDS\t4",
     paste0("NUMBER_OF_SETS\t", n),
@@ -180,211 +332,173 @@ write_cgats_rgb <- function(dt, path, title = "RGB_Target_PrintOrder") {
   writeLines(c(lines, data_lines, "END_DATA"), con = path, useBytes = TRUE)
 }
 
-get_page_mm <- function(paper, page_w_mm, page_h_mm) {
-  if (paper == "A3")   return(list(w=297L, h=420L))
-  if (paper == "A3+")  return(list(w=329L, h=483L))  # common 13x19" stock
-  list(w=as.integer(page_w_mm), h=as.integer(page_h_mm))
-}
-
-# Compute paging so every page has the same rows_per_page (<= physical max)
-compute_grid_paged <- function(page_w_mm, page_h_mm,
-                              patch_mm, gap_mm,
-                              margin_side_mm, margin_top_mm, margin_bottom_mm,
-                              max_chart_w_mm = 300,
-                              n_patches) {
-  usable_w_mm <- min(max_chart_w_mm, page_w_mm - 2 * margin_side_mm)
-  usable_h_mm <- page_h_mm - margin_top_mm - margin_bottom_mm
-  pitch_mm <- patch_mm + gap_mm
-
-  cols <- max(1L, floor((usable_w_mm + gap_mm) / pitch_mm))
-  max_rows_fit <- max(1L, floor((usable_h_mm + gap_mm) / pitch_mm))
-
-  total_rows_needed <- as.integer(ceiling(n_patches / cols))
-  pages <- as.integer(ceiling(total_rows_needed / max_rows_fit))
-  if (pages < 1L) pages <- 1L
-
-  rows_per_page <- as.integer(ceiling(total_rows_needed / pages))
-  if (rows_per_page > max_rows_fit) rows_per_page <- max_rows_fit
-
-  capacity <- cols * rows_per_page * pages
-
-  list(cols=cols, rows_per_page=rows_per_page, pages=pages, capacity=capacity,
-       pitch_mm=pitch_mm, max_rows_fit=max_rows_fit)
-}
-
-# MYIROtools chart definition XML writer (based on uploaded "Chart 5207 Patches.xml")
-# Geometry units: 0.01 mm (mm * 100)
-# Color values: 0..25500 (channel * 100)
+# MYIROtools chart definition XML modeled after sample:
+# - pages via <Sheet Page="1"> ... </Sheet>
+# - patches as <Patch Row=".." Column=".." ColorValue1="R*100" ...>
+# Geometry in 0.01mm (integers). PatchColor values in 0..25500.
 write_myiro_chart_xml <- function(dt, path,
-                                 chart_name,
-                                 page_w_mm, page_h_mm,
-                                 cols, rows_per_page, pages,
-                                 patch_mm, gap_mm,
-                                 margin_left_mm, margin_top_mm) {
-  n <- nrow(dt)
+                                  page_w_mm, page_h_mm,
+                                  cols, rows_per_page, pages,
+                                  patch_mm, gap_mm,
+                                  margin_left_mm, margin_top_mm,
+                                  title="RGB Target") {
+  # MYIROtools ChartDefinition schema (v5), compatible with charts imported/created in MYIROtools.
+  # Assumes dt is already in PRINT ORDER and padded so nrow(dt) == cols*rows_per_page*pages
+  stopifnot(nrow(dt) == cols * rows_per_page * pages)
+  
+  mm100 <- function(x) as.integer(round(x * 100))
+  
+  # MYIROtools uses "Gap" fields as the PITCH (patch + gap), not the gap itself
+  pitch <- mm100(patch_mm + gap_mm)      # PatchWidthGap / PatchHeightGap
+  pw <- mm100(patch_mm)                  # PatchWidth
+  ph <- mm100(patch_mm)                  # PatchHeight
+  left <- mm100(margin_left_mm)          # LeftTopX
+  top  <- mm100(margin_top_mm)           # LeftTopY
+  
+  # Sheet size should be the actual page size in 0.01mm
+  sheetW <- mm100(page_w_mm)
+  sheetH <- mm100(page_h_mm)
+  
+  total <- nrow(dt)
   per_page <- cols * rows_per_page
-  expected <- per_page * pages
-  if (n != expected) stop("XML layout mismatch: patch count != cols*rows*pages")
-
-  mm100 <- function(x) as.character(as.integer(round(x * 100)))
-  ch100 <- function(x) as.character(as.integer(round(x * 100)))
-
-  pitch_mm <- patch_mm + gap_mm
-
-  # Header
-  lines <- c(
-    '<?xml version="1.0" encoding="utf-8"?>',
-    '<Data Identifier="ChartDefinition" Version="05.00" Application="MYIROtools">',
-    sprintf('<Chart UNIT="0" PreviewProfile="" fdxMode="" CreateTime="" Kind="Normal" fdxMode2="" fd9RecogVerify="" Barcode="0" fd9Aperture="" i1proMode="" fd7Mode="" UUID="" ChartName="%s" PrintFileThumbnail="" Recog="Combine" PrintFile="" ChartPatchCount="%d" SpotScanLock="" MeasurementObjectType="" SheetCount="%d" i1pro2Mode="">',
-            gsub('"','&quot;', chart_name), n, pages)
-  )
-
-  # Sheets + Areas
-  id_counter <- 1L
+  
+  # UUID-like token (MYIROtools often has one; format not strict)
+  set.seed(1)
+  uuid <- paste0(sample(c(letters[1:6], 0:9), 32, TRUE), collapse="")
+  
+  lines <- character()
+  lines <- c(lines, '<?xml version="1.0" encoding="UTF-8"?>')
+  lines <- c(lines, '<Data Identifier="ChartDefinition" Version="05.00" Application="MYIROtools">')
+  
+  # Keep the Chart attribute set broad and MYIRO-like (empty strings are acceptable)
+  lines <- c(lines, sprintf(
+    '  <Chart UNIT="0" PreviewProfile="" fdxMode="" fdxMode2="" CreateTime="" Kind="Normal" fd9RecogVerify="" Barcode="0" fd9Aperture="" i1proMode="" fd7Mode="" UUID="%s" ChartName="%s" PrintFileThumbnail="" Recog="Combine" PrintFile="" ChartPatchCount="%d" SpotScanLock="" MeasurementObjectType="" SheetCount="%d" i1pro2Mode="">',
+    uuid, title, total, pages
+  ))
+  
   for (p in seq_len(pages)) {
-    # whole page sheet
-    sheet_width  <- mm100(page_w_mm)
-    sheet_height <- mm100(page_h_mm)
-
-    lines <- c(lines,
-      sprintf('<Sheet AreaCount="1" BarcodeHeight="0" PatchCount="%d" Height="%s" BarcodeWidth="0" Page="%d" BarcodeLeftTopX="0" BarcodeLeftTopY="0" Width="%s">',
-              per_page, sheet_height, p, sheet_width),
-      sprintf('<Area PatchWidthGap="%s" PatchHeightGap="%s" PatchCount="%d" RowCount="%d" ColumnCount="%d" Number="1" PatchWidth="%s" PatchHeight="%s" LeftTopX="%s" LeftTopY="%s">',
-              mm100(pitch_mm), mm100(pitch_mm), per_page, rows_per_page, cols,
-              mm100(patch_mm), mm100(patch_mm), mm100(margin_left_mm), mm100(margin_top_mm))
-    )
-
-    # patches for this page
-    start <- (p - 1L) * per_page + 1L
-    end   <- p * per_page
-    sub <- dt[start:end]
-
-    # order: row-major within area
+    start <- (p-1)*per_page + 1
+    end   <- p*per_page
+    sub   <- dt[start:end]
+    
+    lines <- c(lines, sprintf(
+      '    <Sheet AreaCount="1" BarcodeHeight="0" PatchCount="%d" Height="%d" BarcodeWidth="0" Page="%d" BarcodeLeftTopX="0" BarcodeLeftTopY="0" Width="%d">',
+      per_page, sheetH, p, sheetW
+    ))
+    
+    lines <- c(lines, sprintf(
+      '      <Area PatchWidthGap="%d" PatchHeightGap="%d" PatchCount="%d" RowCount="%d" ColumnCount="%d" Number="1" PatchWidth="%d" PatchHeight="%d" LeftTopX="%d" LeftTopY="%d">',
+      pitch, pitch, per_page, rows_per_page, cols, pw, ph, left, top
+    ))
+    
+    # Sequential IDs (1..total) across pages
+    base_id <- (p-1)*per_page
+    idx <- 1L
     for (r in seq_len(rows_per_page)) {
       for (c in seq_len(cols)) {
-        idx <- (r - 1L) * cols + c
-        rgb <- sub[idx]
-        lines <- c(lines,
-          sprintf('<Patch ColorValue1="%s" ID="%d" ColorValue2="%s" ColorValue3="%s" Attributes="" ColorFormat="RGB" Group="" Column="%d" Row="%d" />',
-                  ch100(rgb$R), id_counter, ch100(rgb$G), ch100(rgb$B), c, r)
-        )
-        id_counter <- id_counter + 1L
+        rgb <- sub[idx,]
+        id  <- base_id + idx
+        lines <- c(lines, sprintf(
+          '        <Patch ColorValue1="%d" ID="%d" ColorValue2="%d" ColorValue3="%d" Attributes="" ColorFormat="RGB" Group="" Column="%d" Row="%d" />',
+          as.integer(rgb$R*100), id, as.integer(rgb$G*100), as.integer(rgb$B*100), c, r
+        ))
+        idx <- idx + 1L
       }
     }
-
-    lines <- c(lines, '</Area>', '</Sheet>')
+    
+    lines <- c(lines, '      </Area>')
+    lines <- c(lines, '    </Sheet>')
   }
-
-  lines <- c(lines, '</Chart>', '</Data>')
-  writeLines(lines, path, useBytes = TRUE)
+  
+  lines <- c(lines, '  </Chart>')
+  lines <- c(lines, '</Data>')
+  
+  writeLines(lines, con = path, useBytes = TRUE)
 }
 
-# Multi-page TIFF writer forced to cols/rows_per_page/pages
-write_patch_pages_tiff_mm_fixed <- function(dt, out_dir,
-                                           page_w_mm, page_h_mm,
-                                           dpi,
-                                           patch_mm, gap_mm,
-                                           margin_left_mm, margin_top_mm, margin_bottom_mm,
-                                           cols, rows_per_page, pages,
-                                           filename_prefix = "pages_") {
-  n <- nrow(dt)
-  per_page <- cols * rows_per_page
-  expected <- per_page * pages
-  if (n != expected) stop("TIFF layout mismatch: patch count != cols*rows*pages")
-
+write_tiff_pages_forced <- function(dt, out_dir,
+                                    page_w_mm, page_h_mm,
+                                    dpi,
+                                    patch_mm, gap_mm,
+                                    margin_left_mm, margin_top_mm, margin_trailing_mm,
+                                    cols, rows_per_page, pages,
+                                    filename_prefix="pages_") {
   mm_to_px <- function(mm) as.integer(round(mm * dpi / 25.4))
-
   page_w_px <- mm_to_px(page_w_mm)
   page_h_px <- mm_to_px(page_h_mm)
+  patch_px  <- mm_to_px(patch_mm)
+  gap_px    <- mm_to_px(gap_mm)
+  left_px   <- mm_to_px(margin_left_mm)
+  top_px    <- mm_to_px(margin_top_mm)
+  trailing_px <- mm_to_px(margin_trailing_mm)
+  y_limit <- page_h_px - trailing_px
 
-  patch_px <- mm_to_px(patch_mm)
-  gap_px   <- mm_to_px(gap_mm)
-  pitch_px <- patch_px + gap_px
-
-  x0 <- mm_to_px(margin_left_mm) + 1L
-  y0 <- mm_to_px(margin_top_mm) + 1L
-  y_limit <- page_h_px - mm_to_px(margin_bottom_mm)
+  per_page <- cols * rows_per_page
 
   files <- character(pages)
-
   for (p in seq_len(pages)) {
-    start <- (p - 1L) * per_page + 1L
-    end   <- p * per_page
+    start <- (p-1)*per_page + 1
+    end <- p*per_page
     sub <- dt[start:end]
 
-    img <- array(255L, dim = c(page_h_px, page_w_px, 3))
+    img <- array(255L, dim=c(page_h_px, page_w_px, 3))
+    idx <- 1
+    for (r in seq_len(rows_per_page)) {
+      for (c in seq_len(cols)) {
+        x <- left_px + (c-1)*(patch_px + gap_px) + 1
+        y <- top_px  + (r-1)*(patch_px + gap_px) + 1
+        x1 <- min(page_w_px, x + patch_px - 1)
+        y1 <- min(y_limit,  y + patch_px - 1)
 
-    for (i in seq_len(per_page)) {
-      rr <- ((i - 1L) %/% cols) + 1L
-      cc <- ((i - 1L) %% cols) + 1L
-
-      x <- x0 + (cc - 1L) * pitch_px
-      y <- y0 + (rr - 1L) * pitch_px
-
-      x1 <- min(page_w_px, x + patch_px - 1L)
-      y1 <- min(y_limit,  y + patch_px - 1L)
-
-      img[y:y1, x:x1, 1] <- sub$R[i]
-      img[y:y1, x:x1, 2] <- sub$G[i]
-      img[y:y1, x:x1, 3] <- sub$B[i]
+        img[y:y1, x:x1, 1] <- as.integer(sub$R[idx])
+        img[y:y1, x:x1, 2] <- as.integer(sub$G[idx])
+        img[y:y1, x:x1, 3] <- as.integer(sub$B[idx])
+        idx <- idx + 1
+      }
     }
 
     fname <- sprintf("%s%03d.tif", filename_prefix, p)
     fpath <- file.path(out_dir, fname)
-    writeTIFF(img / 255, fpath, compression = "none")
+    writeTIFF(img/255, fpath, compression="none")
     files[p] <- fpath
   }
-
   files
 }
 
-# ---------------- UI ----------------
+# -------------------- app --------------------
 
 ui <- fluidPage(
-  titlePanel("RGB Calibration Target Generator (MYIROtools XML)"),
+  titlePanel("High-quality RGB Target Generator (MYIRO XML)"),
   sidebarLayout(
     sidebarPanel(
-      numericInput("total_colors", "Total colors (FINAL after siblings; before WB/pad)", value = 6000, min = 4000, max = 12000, step = 100),
-      numericInput("neutral_steps", "Neutral grays count (R=G=B)", value = 33, min = 5, max = 512, step = 1),
+      numericInput("total_colors", "Chromatic target colors (final after siblings; before WB/pad)", value = 6000, min = 4000, max = 12000, step = 100),
+      numericInput("neutral_steps", "Neutral greys count (R=G=B)", value = 33, min = 5, max = 256, step = 1),
+      numericInput("offgrey_rings", "Off-grey rings (columns) around neutral axis", value = 2, min = 0, max = 8, step = 1),
 
-      checkboxInput("use_offgray", "Add off-gray set", value = TRUE),
-      numericInput("offgray_multiplier", "Off-gray multiplier (x neutrals)", value = 1, min = 0, max = 20, step = 1),
-
-      checkboxInput("use_hue_ramps", "Add primary/secondary ramps (tint+shade)", value = TRUE),
+      checkboxInput("use_hue_ramps", "Include primary/secondary ramps (tint+shade)", value = TRUE),
       checkboxInput("add_siblings", "Add siblings (RGB cyclic permutations)", value = TRUE),
 
       tags$hr(),
       numericInput("wb_repeats_each", "Extra white patches AND extra black patches (each)", value = 24, min = 0, max = 5000, step = 1),
 
       tags$hr(),
-      numericInput("seed", "Shuffle seed (reproducible)", value = 12345, min = 1, max = 9999999, step = 1),
-
-      selectInput("pad_mode", "Padding color",
-                  choices = c("alternate white/black"="alternate", "white"="white", "black"="black"),
-                  selected = "alternate"),
+      numericInput("seed", "Seed (reproducible)", value = 12345, min = 1, max = 9999999, step = 1),
+      selectInput("pad_mode", "Padding color", choices = c("alternate"="alternate","white"="white","black"="black"), selected = "alternate"),
 
       tags$hr(),
-      textInput("chart_name", "Chart name", value = "RGB Target"),
-
-      tags$hr(),
+      numericInput("max_pages", "Max pages allowed", value = 3, min = 1, max = 50, step = 1),
       numericInput("dpi", "TIFF DPI", value = 300, min = 150, max = 600, step = 10),
-      selectInput("paper", "Paper", choices = c("A3"="A3", "A3+"="A3+", "Custom"="custom"), selected = "A3+"),
+      selectInput("paper", "Paper", choices = c("A3"="A3","A3+"="A3+","Custom"="custom"), selected="A3+"),
       conditionalPanel(
         condition = "input.paper == 'custom'",
         numericInput("page_w_mm", "Page width (mm)", value = 329, min = 100, max = 2000, step = 1),
         numericInput("page_h_mm", "Page height (mm)", value = 483, min = 100, max = 2000, step = 1)
       ),
-
-      numericInput("patch_mm", "Patch size (mm)", value = 6, min = 2, max = 30, step = 1),
-      numericInput("gap_mm", "Gap between patches (mm)", value = 0, min = 0, max = 10, step = 1),
-
-      tags$hr(),
-      numericInput("margin_left_mm", "Left/Right margin (mm)", value = 4, min = 0, max = 50, step = 1),
-      numericInput("margin_top_mm", "Top margin (mm)", value = 23, min = 0, max = 80, step = 1),
-      numericInput("margin_bottom_mm", "Bottom margin (mm)", value = 33, min = 0, max = 120, step = 1),
+      numericInput("patch_mm", "Patch size (mm)", value = 6, min = 6, max = 30, step = 1),
+      numericInput("gap_mm", "Gap (mm)", value = 1, min = 0, max = 5, step = 1),
 
       tags$hr(),
-      downloadButton("download_zip", "Download ZIP (TIFF + CGATS + MYIRO XML)")
+      downloadButton("download_zip", "Download ZIP (MYIRO XML + TIFF pages + CGATS + CSV)")
     ),
     mainPanel(
       verbatimTextOutput("stats"),
@@ -393,177 +507,224 @@ ui <- fluidPage(
   )
 )
 
-# ---------------- server ----------------
-
 server <- function(input, output, session) {
 
+  # Core generation: returns a list with dt (print order, padded), gridp, and base stats
   generated <- reactive({
-    k <- as.integer(input$neutral_steps)
-    neutrals <- make_neutrals(k)
 
-    neutral_step <- 255 / (k - 1)
+    set.seed(as.integer(input$seed))
+
+    k <- as.integer(input$neutral_steps)
+    rings <- as.integer(input$offgrey_rings)
+
+    # delta_max tied to neutral spacing (gamma steps might shrink spacing; keep conservative)
+    neutral_raw <- gamma_steps(k, gamma=2.2)
+    if (length(neutral_raw) <= 1) neutral_step <- 255 else neutral_step <- mean(diff(neutral_raw))
     delta_max <- as.integer(max(1, min(12, round(neutral_step / 3))))
 
-    offgray <- data.table(R=integer(), G=integer(), B=integer())
-    if (isTRUE(input$use_offgray) && input$offgray_multiplier > 0) {
-      offgray <- make_offgray(neutrals, total_offgray = k * as.integer(input$offgray_multiplier), delta_max = delta_max)
+    neutrals <- make_neutrals(k, gamma=2.2)
+    primsec <- make_primaries_secondaries()
+    ramps <- data.table(R=integer(),G=integer(),B=integer())
+    if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k, gamma=2.2)
+
+    offgrey <- make_offgrey_rings(neutrals, rings=rings, delta_max=delta_max)
+
+    mandatory <- unique(rbindlist(list(neutrals, primsec, ramps, offgrey)))
+
+    # Apply siblings if enabled (mandatory too)
+    if (isTRUE(input$add_siblings)) mandatory <- add_siblings(mandatory)
+
+    # Build fill pool WITHOUT truncating mandatory
+    target_chromatic <- as.integer(input$total_colors)
+
+    # If mandatory already exceeds target, we KEEP it (quality > arbitrary count),
+    # but we will still enforce max_pages via paging.
+    base <- mandatory
+    n_base <- nrow(base)
+
+    n_need_final <- max(0L, target_chromatic - n_base)
+    
+    fill <- data.table(R=integer(),G=integer(),B=integer())
+    if (n_need_final > 0) {
+      # generate only as many "root" colors as needed; siblings will be handled implicitly by root->triplet
+      n_root <- if (isTRUE(input$add_siblings)) ceiling(n_need_final / 3) else n_need_final
+      
+      root <- make_fill_poisson_oklab(n_root, seed = as.integer(input$seed) + 101, candidate_mult=6L, max_candidates=40000L)
+      
+      if (isTRUE(input$add_siblings)) {
+        fill <- add_siblings(root)
+      } else {
+        fill <- root
+      }
+      
+      fill <- fill[!base, on=.(R,G,B)]
+    }
+    chromatic <- unique(rbindlist(list(base, fill)))
+    
+    # If still short, top-up similarly (same rule)
+    tries <- 0
+    while (nrow(chromatic) < target_chromatic && tries < 6) {
+      tries <- tries + 1
+      need2 <- target_chromatic - nrow(chromatic)
+      n_root2 <- if (isTRUE(input$add_siblings)) ceiling(need2 / 3) else need2
+      
+      root2 <- make_fill_poisson_oklab(n_root2, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
+      extra <- if (isTRUE(input$add_siblings)) add_siblings(root2) else root2
+      extra <- extra[!chromatic, on=.(R,G,B)]
+      chromatic <- unique(rbindlist(list(chromatic, extra)))
     }
 
-    ramps <- data.table(R=integer(), G=integer(), B=integer())
-    if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k)
+    # If we still undershot because of dedupe/siblings collisions, top-up iteratively
+    tries <- 0
+    while (nrow(chromatic) < target_chromatic && tries < 6) {
+      tries <- tries + 1
+      extra_need <- target_chromatic - nrow(chromatic)
+      extra <- make_fill_poisson_oklab(extra_need, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
+      if (isTRUE(input$add_siblings)) extra <- add_siblings(extra)
+      extra <- extra[!chromatic, on=.(R,G,B)]
+      chromatic <- unique(rbindlist(list(chromatic, extra)))
+    }
 
-    base <- unique(rbindlist(list(neutrals, offgray, ramps)))
-
-    target_final <- as.integer(input$total_colors)
-
-    # Build enough pre-siblings, then siblings, then trim
-    target_pre <- if (isTRUE(input$add_siblings)) ceiling(target_final / 3) else target_final
-    overshoot  <- ceiling(target_pre * 1.35)
-
-    fill_n <- max(0L, overshoot - nrow(base))
-    fill <- make_uniform_fill(fill_n)
-
-    dt <- unique(rbindlist(list(base, fill)))
-    if (isTRUE(input$add_siblings)) dt <- add_siblings(dt)
-
-    dt <- dt[order(R, G, B)]
-    if (nrow(dt) > target_final) dt <- dt[1:target_final]
-
-    # Add repeated paper white + black measurements
+    # We allow overshoot (keep it) as long as it fits in max_pages
+    # Add repeated white/black measurements AFTER chromatic selection
+    dt <- copy(chromatic)
     dt <- add_white_black_repeats(dt, input$wb_repeats_each)
 
-    # Scramble order (reproducible)
+    # Scramble print order to counter drift
     set.seed(as.integer(input$seed))
     dt <- dt[sample.int(nrow(dt))]
 
-    # Compute page/grid and pad so every page has equal rows
+    # Paging / capacity
     pg <- get_page_mm(input$paper, input$page_w_mm, input$page_h_mm)
+
+    # MYIRO scan margin handling: we reserve a safe left/top margin for grid placement.
+    # (Keep your FD-S2w-like minimums; adjust if your MYIROtools template expects different.)
+    margin_side_mm <- 4
+    margin_top_mm <- 23
+    margin_trailing_mm <- 33
+
     gridp <- compute_grid_paged(
-      page_w_mm = pg$w, page_h_mm = pg$h,
+      page_w_mm = pg$w,
+      page_h_mm = pg$h,
       patch_mm = as.integer(input$patch_mm),
-      gap_mm   = as.integer(input$gap_mm),
-      margin_side_mm = as.integer(input$margin_left_mm),
-      margin_top_mm  = as.integer(input$margin_top_mm),
-      margin_bottom_mm = as.integer(input$margin_bottom_mm),
+      gap_mm = as.integer(input$gap_mm),
+      margin_side_mm = margin_side_mm,
+      margin_leading_mm = margin_top_mm,
+      margin_trailing_mm = margin_trailing_mm,
       max_chart_w_mm = 300,
-      n_patches = nrow(dt)
+      n_patches = nrow(dt),
+      max_pages = as.integer(input$max_pages)
     )
 
-    need <- gridp$capacity - nrow(dt)
-    if (need > 0) dt <- rbindlist(list(dt, pad_n(need, mode = input$pad_mode)), use.names = TRUE)
+    if (!isTRUE(gridp$fits)) {
+      stop(sprintf("Does not fit within max_pages=%d. Need at least %d pages with current patch/gap and margins.",
+                   as.integer(input$max_pages), as.integer(gridp$pages_needed)))
+    }
 
-    dt
+    # If there is spare capacity within max_pages, keep overshoot; then pad to full capacity
+    dt <- pad_to_capacity(dt, capacity = gridp$total_capacity, mode = input$pad_mode)
+
+    # Return final
+    list(
+      dt = dt,
+      gridp = gridp,
+      pg = pg,
+      delta_max = delta_max,
+      mandatory_count = nrow(mandatory),
+      chromatic_count = nrow(chromatic)
+    )
   })
 
   output$stats <- renderPrint({
-    dt <- generated()
-    pg <- get_page_mm(input$paper, input$page_w_mm, input$page_h_mm)
+    g <- generated()
+    dt <- g$dt
+    gridp <- g$gridp
+    cat("Chromatic set (after siblings, incl mandatory+fill):", g$chromatic_count, "\n")
+    cat("Mandatory set size:", g$mandatory_count, "\n")
+    cat("Printed patches (incl WB repeats + padding):", nrow(dt), "\n")
+    cat("Off-grey delta_max used:", g$delta_max, "\n\n")
 
-    gridp <- compute_grid_paged(
-      page_w_mm = pg$w, page_h_mm = pg$h,
-      patch_mm = as.integer(input$patch_mm),
-      gap_mm   = as.integer(input$gap_mm),
-      margin_side_mm = as.integer(input$margin_left_mm),
-      margin_top_mm  = as.integer(input$margin_top_mm),
-      margin_bottom_mm = as.integer(input$margin_bottom_mm),
-      max_chart_w_mm = 300,
-      n_patches = nrow(dt)
-    )
-
-    cat("Base chromatic target (after siblings; before WB/pad):", input$total_colors, "\n")
-    cat("Final printed patches (includes WB repeats + padding):", nrow(dt), "\n\n")
-    cat("Page (mm):", pg$w, "x", pg$h, "\n")
-    cat("Patch (mm):", input$patch_mm, " Gap (mm):", input$gap_mm, "\n")
-    cat("Margins (mm): L/R", input$margin_left_mm, " Top", input$margin_top_mm, " Bottom", input$margin_bottom_mm, "\n\n")
-    cat("Grid:", gridp$cols, "cols x", gridp$rows_per_page, "rows per page x", gridp$pages, "pages\n")
-    cat("Capacity:", gridp$capacity, " patches\n")
-    cat("Max rows that fit physically:", gridp$max_rows_fit, "\n\n")
+    cat("Page (mm):", g$pg$w, "x", g$pg$h, "\n")
+    cat("Grid:", gridp$cols, "cols x", gridp$rows_per_page, "rows/page x", gridp$pages, "pages\n")
+    cat("Capacity:", gridp$total_capacity, "patches\n\n")
 
     print(dt[, .(R_min=min(R), R_max=max(R), G_min=min(G), G_max=max(G), B_min=min(B), B_max=max(B))])
   })
 
-  output$preview <- renderTable({ head(generated(), 25) })
+  output$preview <- renderTable({
+    head(generated()$dt, 30)
+  })
 
   output$download_zip <- downloadHandler(
-    filename = function() "calibration_target.zip",
+    filename = function() "rgb_target_myiro.zip",
     content = function(file) {
-      dt <- generated()
-      pg <- get_page_mm(input$paper, input$page_w_mm, input$page_h_mm)
-
-      gridp <- compute_grid_paged(
-        page_w_mm = pg$w, page_h_mm = pg$h,
-        patch_mm = as.integer(input$patch_mm),
-        gap_mm   = as.integer(input$gap_mm),
-        margin_side_mm = as.integer(input$margin_left_mm),
-        margin_top_mm  = as.integer(input$margin_top_mm),
-        margin_bottom_mm = as.integer(input$margin_bottom_mm),
-        max_chart_w_mm = 300,
-        n_patches = nrow(dt)
-      )
-
-      # Safety: ensure dt exactly matches capacity
-      need <- gridp$capacity - nrow(dt)
-      if (need > 0) dt <- rbindlist(list(dt, pad_n(need, mode = input$pad_mode)), use.names = TRUE)
-      if (nrow(dt) != gridp$capacity) stop("Internal error: dt != capacity")
+      g <- generated()
+      dt <- g$dt
+      gridp <- g$gridp
+      pg <- g$pg
 
       tmpdir <- tempdir()
       outdir <- file.path(tmpdir, paste0("target_", as.integer(Sys.time())))
       dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 
-      # CSV + CGATS in print order
-      csv_path <- file.path(outdir, "colors_print_order.csv")
+      # outputs
+      csv_path   <- file.path(outdir, "colors_print_order.csv")
       cgats_path <- file.path(outdir, "target.cgats.txt")
-      fwrite(dt, csv_path)
-      write_cgats_rgb(dt, cgats_path, title = input$chart_name)
+      xml_path   <- file.path(outdir, "chart_definition.xml")
 
-      # MYIROtools chart definition XML (page-aware)
-      xml_path <- file.path(outdir, "chart_definition.xml")
+      fwrite(dt, csv_path)
+      write_cgats_rgb(dt, cgats_path, title = "RGB_Target_PrintOrder")
+
+      # MYIRO XML:
       write_myiro_chart_xml(
-        dt = dt, path = xml_path,
-        chart_name = input$chart_name,
-        page_w_mm = pg$w, page_h_mm = pg$h,
-        cols = gridp$cols, rows_per_page = gridp$rows_per_page, pages = gridp$pages,
-        patch_mm = as.integer(input$patch_mm), gap_mm = as.integer(input$gap_mm),
-        margin_left_mm = as.integer(input$margin_left_mm),
-        margin_top_mm  = as.integer(input$margin_top_mm)
+        dt = dt,
+        path = xml_path,
+        page_w_mm = pg$w,
+        page_h_mm = pg$h,
+        cols = gridp$cols,
+        rows_per_page = gridp$rows_per_page,
+        pages = gridp$pages,
+        patch_mm = as.integer(input$patch_mm),
+        gap_mm = as.integer(input$gap_mm),
+        margin_left_mm = 4,
+        margin_top_mm = 23,
+        title = "RGB Target"
       )
 
-      # TIFF pages (match the same grid)
-      write_patch_pages_tiff_mm_fixed(
+      # TIFF pages (forced to same grid)
+      tiff_files <- write_tiff_pages_forced(
         dt = dt, out_dir = outdir,
         page_w_mm = pg$w, page_h_mm = pg$h,
         dpi = as.integer(input$dpi),
         patch_mm = as.integer(input$patch_mm),
         gap_mm = as.integer(input$gap_mm),
-        margin_left_mm = as.integer(input$margin_left_mm),
-        margin_top_mm  = as.integer(input$margin_top_mm),
-        margin_bottom_mm = as.integer(input$margin_bottom_mm),
-        cols = gridp$cols, rows_per_page = gridp$rows_per_page, pages = gridp$pages,
+        margin_left_mm = 4,
+        margin_top_mm = 23,
+        margin_trailing_mm = 33,
+        cols = gridp$cols,
+        rows_per_page = gridp$rows_per_page,
+        pages = gridp$pages,
         filename_prefix = "pages_"
       )
 
-      # Manifest
       manifest <- file.path(outdir, "manifest.txt")
       writeLines(c(
-        paste0("base_chromatic_target_after_siblings=", input$total_colors),
-        paste0("final_printed_patches=", nrow(dt)),
-        paste0("chart_name=", input$chart_name),
+        paste0("chromatic_count=", g$chromatic_count),
+        paste0("mandatory_count=", g$mandatory_count),
+        paste0("printed_patches_total=", nrow(dt)),
         paste0("page_w_mm=", pg$w),
         paste0("page_h_mm=", pg$h),
-        paste0("dpi=", input$dpi),
-        paste0("patch_mm=", input$patch_mm),
-        paste0("gap_mm=", input$gap_mm),
-        paste0("margin_left_mm=", input$margin_left_mm),
-        paste0("margin_top_mm=", input$margin_top_mm),
-        paste0("margin_bottom_mm=", input$margin_bottom_mm),
         paste0("cols=", gridp$cols),
         paste0("rows_per_page=", gridp$rows_per_page),
         paste0("pages=", gridp$pages),
-        paste0("capacity=", gridp$capacity),
-        paste0("seed=", input$seed)
+        paste0("capacity=", gridp$total_capacity),
+        paste0("seed=", input$seed),
+        paste0("neutral_steps=", input$neutral_steps),
+        paste0("offgrey_rings=", input$offgrey_rings),
+        paste0("wb_each=", input$wb_repeats_each),
+        paste0("pad_mode=", input$pad_mode)
       ), manifest, useBytes = TRUE)
 
-      # Zip all files (absolute paths; no setwd)
       files_abs <- list.files(outdir, full.names = TRUE)
       zip::zipr(zipfile = file, files = files_abs)
     }
