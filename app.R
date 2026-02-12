@@ -169,13 +169,7 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
    mags <- mags[keep_idx]
 }
   
-  # If rounding collapsed values (rare), top up with missing integers
-  if (length(mags) < rings) {
-    missing <- setdiff(seq_len(delta_max), mags)
-    mags <- sort(c(mags, head(missing, rings - length(mags))))
-  }
-  
-  dirs <- rbind(
+dirs <- rbind(
     c( 1, 0, 0), c(0,  1, 0), c(0, 0,  1),
     c(-1, 0, 0), c(0, -1, 0), c(0, 0, -1)
   )
