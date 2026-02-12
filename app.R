@@ -134,10 +134,10 @@ make_primaries_secondaries <- function() {
 
 # Off-grey rings (density-based): for each neutral v, for each ring magnitude, generate +/- axis offsets
 # total_colors: FINAL chromatic target (after siblings) -> used to estimate sampling density
-make_offgrey_rings <- function(neutrals_dt, rings = 2L, total_colors = 6000L) {
+make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   rings <- as.integer(rings)
   if (rings <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
-  nd <- nrow(neutrals_dt)
+  nd <- nrow(neutrals)
   if (nd == 0) return(data.table(R=integer(), G=integer(), B=integer()))
   
   N <- max(1L, as.integer(total_colors))
@@ -167,7 +167,7 @@ make_offgrey_rings <- function(neutrals_dt, rings = 2L, total_colors = 6000L) {
   idx <- 1L
   
   for (i in seq_len(nd)) {
-    base_rgb <- as.integer(neutrals_dt[i, .(R, G, B)])
+    base_rgb <- as.integer(neutrals[i, .(R, G, B)])
     for (m in mags) {
       for (d in seq_len(nrow(dirs))) {
         rgb <- base_rgb + as.integer(dirs[d,] * m)
@@ -652,7 +652,7 @@ server <- function(input, output, session) {
     ramps <- data.table(R=integer(),G=integer(),B=integer())
     if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k, gamma=2.2)
 
-    offgrey <- make_offgrey_rings(neutrals_dt, rings=input$offgrey_rings, total_colors=input$total_colors)
+    offgrey <- make_offgrey_rings(neutrals, rings=input$offgrey_rings, total_colors=input$total_colors)
 
     mandatory <- unique(rbindlist(list(neutrals, primsec, ramps, offgrey)))
 
