@@ -134,7 +134,7 @@ make_primaries_secondaries <- function() {
 
 # Off-grey rings (density-based): for each neutral v, for each ring magnitude, generate +/- axis offsets
 # total_colors: FINAL chromatic target (after siblings) -> used to estimate sampling density
-make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L, delta_max_override = NULL) {
+make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   rings <- as.integer(rings)
   if (rings <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
   nd <- nrow(neutrals)
@@ -145,12 +145,8 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L, delta
   # Expected spacing scale in RGB codes (heuristic): ~255 / N^(1/3)
   base <- round(255 / (N^(1/3)))
   
-  # Density-based max radius, clamped. Ensures >= 3 so 3 rings stays meaningful.
-  delta_max <- if (is.null(delta_max_override)) {
-    max(3L, min(30L, as.integer(round(2 * base))))
-  } else {
-    max(1L, as.integer(delta_max_override))
-  }
+  # Density-based max radius from expected RGB spacing, clamped to keep 3-ring output meaningful.
+  delta_max <- max(3L, min(30L, as.integer(round(base / 5))))
   
   # Magnitudes evenly spread from 1..delta_max; ensure unique + at least 'rings' if possible
   mags <- as.integer(round(seq(1, delta_max, length.out = rings)))
@@ -648,11 +644,6 @@ server <- function(input, output, session) {
     k <- as.integer(input$neutral_steps)
     rings <- as.integer(input$offgrey_rings)
 
-    # delta_max tied to neutral spacing (gamma steps might shrink spacing; keep conservative)
-    neutral_raw <- gamma_steps(k, gamma=2.2)
-    if (length(neutral_raw) <= 1) neutral_step <- 255 else neutral_step <- mean(diff(neutral_raw))
-    delta_max <- as.integer(max(1, min(12, round(neutral_step / 3))))
-
     neutrals <- make_neutrals(k, gamma=2.2)
     primsec <- make_primaries_secondaries()
     ramps <- data.table(R=integer(),G=integer(),B=integer())
@@ -661,8 +652,7 @@ server <- function(input, output, session) {
     offgrey <- make_offgrey_rings(
       neutrals,
       rings = input$offgrey_rings,
-      total_colors = input$total_colors,
-      delta_max_override = delta_max
+      total_colors = input$total_colors
     )
     delta_max_used <- attr(offgrey, "delta_max_used")
 

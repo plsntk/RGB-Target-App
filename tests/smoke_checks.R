@@ -22,10 +22,10 @@ padded <- pad_to_capacity(base_dt, capacity = 6, mode = "alternate")
 stopifnot(nrow(padded) == 6)
 stopifnot(identical(as.integer(padded$R[3:6]), c(255L, 0L, 255L, 0L)))
 
-# make_offgrey_rings: honors override and preserves bounds
+# make_offgrey_rings: density-based rings keep 1/2/3 deltas and preserve bounds
 neutrals <- make_neutrals(5)
-rings <- make_offgrey_rings(neutrals, rings = 2, total_colors = 6000, delta_max_override = 4)
-stopifnot(identical(attr(rings, "delta_max_used"), 4L))
+rings <- make_offgrey_rings(neutrals, rings = 3, total_colors = 6000)
+stopifnot(identical(sort(unique(abs(rings$R - rings$G))), c(0L, 1L, 2L, 3L)))
 stopifnot(all(rings$R >= 0L & rings$R <= 255L))
 stopifnot(all(rings$G >= 0L & rings$G <= 255L))
 stopifnot(all(rings$B >= 0L & rings$B <= 255L))
