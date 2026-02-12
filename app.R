@@ -45,6 +45,14 @@ gamma_steps <- function(k, gamma=2.2) {
   clip255(unique(v))
 }
 
+# Linear-light steps mapped back to sRGB code values (prevents highlight bias)
+linear_steps_srgb <- function(k) {
+  if (k <= 1) return(0L)
+  t <- seq(0, 1, length.out = k)          # linear light
+  srgb01 <- ifelse(t <= 0.0031308, 12.92*t, 1.055*(t^(1/2.4)) - 0.055)
+  clip255(unique(as.integer(round(255 * srgb01))))
+}
+
 # -------------------- OKLab conversion --------------------
 # sRGB (0..255) -> linear -> OKLab (per Björn Ottosson)
 srgb_to_linear <- function(u01) {
@@ -85,14 +93,14 @@ rgb255_to_oklab <- function(rgb) {
 
 # -------------------- mandatory set --------------------
 
-make_neutrals <- function(k, gamma=2.2) {
-  v <- gamma_steps(k, gamma=gamma)
+make_neutrals <- function(k) {
+  v <- linear_steps_srgb(k)
   data.table(R=v, G=v, B=v)
 }
 
-make_hue_ramps <- function(k, gamma=2.2) {
+make_hue_ramps <- function(k) {
   # ramps with k-ish steps (unique rounding allowed)
-  v <- gamma_steps(k, gamma=gamma) / 255  # 0..1
+  v <- linear_steps_srgb(k) / 255 / 255  # 0..1
   hues <- list(
     R = c(255,   0,   0),
     G = c(  0, 255,   0),
@@ -130,6 +138,23 @@ make_primaries_secondaries <- function() {
     G=c(0,0,255,0,0,255,255,255),
     B=c(0,0,0,255,255,0,255,255)
   ) |> unique_rgb_dt()
+}
+
+# Sample points on the RGB cube faces (outer shell). Uses linear-light steps -> sRGB codes.
+make_shell_faces <- function(k_face = 15L) {
+  v <- linear_steps_srgb(as.integer(k_face))
+  # 6 faces: R=0,R=255,G=0,G=255,B=0,B=255
+  faces <- list(
+    data.table(R=0L,   G=rep(v, each=length(v)), B=rep(v, times=length(v))),
+    data.table(R=255L, G=rep(v, each=length(v)), B=rep(v, times=length(v))),
+    data.table(G=0L,   R=rep(v, each=length(v)), B=rep(v, times=length(v))),
+    data.table(G=255L, R=rep(v, each=length(v)), B=rep(v, times=length(v))),
+    data.table(B=0L,   R=rep(v, each=length(v)), G=rep(v, times=length(v))),
+    data.table(B=255L, R=rep(v, each=length(v)), G=rep(v, times=length(v)))
+  )
+  dt <- rbindlist(faces)
+  setnames(dt, c("R","G","B"))
+  unique_rgb_dt(dt)
 }
 
 # Off-grey rings (density-based): for each neutral v, for each ring magnitude, generate +/- axis offsets
@@ -655,10 +680,10 @@ server <- function(input, output, session) {
     k <- as.integer(input$neutral_steps)
     rings <- as.integer(input$offgrey_rings)
 
-    neutrals <- make_neutrals(k, gamma=2.2)
+    neutrals <- make_neutrals(k)
     primsec <- make_primaries_secondaries()
     ramps <- data.table(R=integer(),G=integer(),B=integer())
-    if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k, gamma=2.2)
+    if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k)
 
     offgrey <- make_offgrey_rings(
       neutrals,
@@ -677,12 +702,32 @@ server <- function(input, output, session) {
 
     # If mandatory already exceeds target, we KEEP it (quality > arbitrary count),
     # but we will still enforce max_pages via paging.
-    base <- mandatory
-    n_base <- nrow(base)
+base <- mandatory
 
-    n_need_final <- max(0L, target_chromatic - n_base)
-    
-    fill <- data.table(R=integer(),G=integer(),B=integer())
+# --- Shell budget (fixed percentage) ---
+shell_pct <- 0.20  # 20% of target goes to shell
+target_chromatic <- as.integer(input$total_colors)
+target_shell <- as.integer(round(shell_pct * target_chromatic))
+
+# Generate shell candidates (faces) and take what we can use
+shell_all <- make_shell_faces(k_face = 15L)
+
+if (isTRUE(input$add_siblings)) shell_all <- add_siblings(shell_all)
+shell_all <- shell_all[!base, on=.(R,G,B)]
+
+# If shell_all is larger than needed, downsample deterministically
+if (nrow(shell_all) > target_shell) {
+  set.seed(as.integer(input$seed) + 77)
+  shell_all <- shell_all[sample.int(nrow(shell_all), target_shell)]
+}
+
+base <- unique(rbindlist(list(base, shell_all)))
+n_base <- nrow(base)
+
+# Remaining budget becomes volumetric fill
+n_need_final <- max(0L, target_chromatic - n_base)
+
+fill <- data.table(R=integer(),G=integer(),B=integer())
     if (n_need_final > 0) {
       # generate only as many "root" colors as needed; siblings will be handled implicitly by root->triplet
       n_root <- if (isTRUE(input$add_siblings)) ceiling(n_need_final / 3) else n_need_final
