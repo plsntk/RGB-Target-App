@@ -146,16 +146,18 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   base <- round(255 / (N^(1/3)))
   
   # Density-based max radius from expected RGB spacing, clamped to keep 3-ring output meaningful.
-round_half_up <- function(x) floor(x + 0.5)
+  delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
+  
+  round_half_up <- function(x) floor(x + 0.5)
 
-# Start with evenly spaced radii
-mags <- as.integer(round_half_up(seq(1, delta_max, length.out = rings)))
-mags <- sort(unique(pmax(1L, mags)))
+  # Start with evenly spaced radii
+  mags <- as.integer(round_half_up(seq(1, delta_max, length.out = rings)))
+  mags <- sort(unique(pmax(1L, mags)))
 
-# Force include endpoints (helps for small ring counts)
-mags <- sort(unique(c(1L, mags, delta_max)))
+  # Force include endpoints (helps for small ring counts)
+  mags <- sort(unique(c(1L, mags, delta_max)))
 
-# If we still have fewer than 'rings' distinct values, fill with missing ints
+  # If we still have fewer than 'rings' distinct values, fill with missing ints
   if (length(mags) < rings) {
     missing <- setdiff(seq_len(delta_max), mags)
     mags <- sort(c(mags, head(missing, rings - length(mags))))
