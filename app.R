@@ -134,7 +134,7 @@ make_primaries_secondaries <- function() {
 
 # Off-grey rings (density-based): for each neutral v, for each ring magnitude, generate +/- axis offsets
 # total_colors: FINAL chromatic target (after siblings) -> used to estimate sampling density
-make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
+make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L, delta_max_override = NULL) {
   rings <- as.integer(rings)
   if (rings <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
   nd <- nrow(neutrals)
@@ -146,7 +146,11 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   base <- round(255 / (N^(1/3)))
   
   # Density-based max radius, clamped. Ensures >= 3 so 3 rings stays meaningful.
-  delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
+  delta_max <- if (is.null(delta_max_override)) {
+    max(3L, min(30L, as.integer(round(2 * base))))
+  } else {
+    max(1L, as.integer(delta_max_override))
+  }
   
   # Magnitudes evenly spread from 1..delta_max; ensure unique + at least 'rings' if possible
   mags <- as.integer(round(seq(1, delta_max, length.out = rings)))
@@ -177,7 +181,9 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
     }
   }
   
-  unique(rbindlist(out))
+  result <- unique(rbindlist(out))
+  attr(result, "delta_max_used") <- delta_max
+  result
 }
 
 # -------------------- fill: greedy maximin in OKLab --------------------
@@ -598,7 +604,7 @@ ui <- fluidPage(
     sidebarPanel(
       numericInput("total_colors", "Chromatic target colors (final after siblings; before WB/pad)", value = 6000, min = 4000, max = 12000, step = 100),
       numericInput("neutral_steps", "Neutral greys count (R=G=B)", value = 33, min = 5, max = 256, step = 1),
-      numericInput("offgrey_rings", "Off-grey rings (columns) around neutral axis", value = 2, min = 0, max = 8, step = 1),
+      numericInput("offgrey_rings", "Off-grey ring count around neutral axis", value = 2, min = 0, max = 8, step = 1),
 
       checkboxInput("use_hue_ramps", "Include primary/secondary ramps (tint+shade)", value = TRUE),
       checkboxInput("add_siblings", "Add siblings (RGB cyclic permutations)", value = TRUE),
@@ -652,7 +658,13 @@ server <- function(input, output, session) {
     ramps <- data.table(R=integer(),G=integer(),B=integer())
     if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k, gamma=2.2)
 
-    offgrey <- make_offgrey_rings(neutrals, rings=input$offgrey_rings, total_colors=input$total_colors)
+    offgrey <- make_offgrey_rings(
+      neutrals,
+      rings = input$offgrey_rings,
+      total_colors = input$total_colors,
+      delta_max_override = delta_max
+    )
+    delta_max_used <- attr(offgrey, "delta_max_used")
 
     mandatory <- unique(rbindlist(list(neutrals, primsec, ramps, offgrey)))
 
@@ -704,7 +716,7 @@ server <- function(input, output, session) {
     while (nrow(chromatic) < target_chromatic && tries < 6) {
       tries <- tries + 1
       extra_need <- target_chromatic - nrow(chromatic)
-      extra <- make_fill_poisson_oklab_balanced(extra_need, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
+      extra <- make_fill_poisson_oklab_balanced(extra_need, seed = as.integer(input$seed) + 1101 + tries, candidate_mult=7L, max_candidates=50000L)
       if (isTRUE(input$add_siblings)) extra <- add_siblings(extra)
       extra <- extra[!chromatic, on=.(R,G,B)]
       chromatic <- unique(rbindlist(list(chromatic, extra)))
@@ -754,7 +766,7 @@ server <- function(input, output, session) {
       dt = dt,
       gridp = gridp,
       pg = pg,
-      delta_max = delta_max,
+      delta_max = delta_max_used,
       mandatory_count = nrow(mandatory),
       chromatic_count = nrow(chromatic)
     )
@@ -846,7 +858,7 @@ server <- function(input, output, session) {
         paste0("seed=", input$seed),
         paste0("neutral_steps=", input$neutral_steps),
         paste0("offgrey_rings=", input$offgrey_rings),
-        paste0("wb_each=", input$wb_repeats_each),
+        paste0("wb_repeats_each=", input$wb_repeats_each),
         paste0("pad_mode=", input$pad_mode)
       ), manifest, useBytes = TRUE)
 
@@ -856,4 +868,4 @@ server <- function(input, output, session) {
   )
 }
 
-shinyApp(ui, server)
+if (!identical(Sys.getenv("RGB_TARGET_APP_DISABLE_AUTORUN"), "1")) shinyApp(ui, server)
