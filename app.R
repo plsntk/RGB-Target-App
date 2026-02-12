@@ -146,18 +146,25 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   base <- round(255 / (N^(1/3)))
   
   # Density-based max radius from expected RGB spacing, clamped to keep 3-ring output meaningful.
-  delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
-  
-  # Magnitudes evenly spread from 1..delta_max; ensure unique + at least 'rings' if possible
-  round_half_up <- function(x) floor(x + 0.5)
+round_half_up <- function(x) floor(x + 0.5)
 
-  mags <- as.integer(round_half_up(seq(1, delta_max, length.out = rings)))
-  mags <- sort(unique(pmax(1L, mags)))
+# Start with evenly spaced radii
+mags <- as.integer(round_half_up(seq(1, delta_max, length.out = rings)))
+mags <- sort(unique(pmax(1L, mags)))
 
-if (length(mags) < rings) {
-  # Fill in missing radii by evenly adding integers (still within 1..delta_max)
-  missing <- setdiff(seq_len(delta_max), mags)
-  mags <- sort(c(mags, head(missing, rings - length(mags))))
+# Force include endpoints (helps for small ring counts)
+mags <- sort(unique(c(1L, mags, delta_max)))
+
+# If we still have fewer than 'rings' distinct values, fill with missing ints
+  if (length(mags) < rings) {
+    missing <- setdiff(seq_len(delta_max), mags)
+    mags <- sort(c(mags, head(missing, rings - length(mags))))
+  }
+
+  # If we have more than 'rings' (can happen after forcing endpoints), thin evenly
+  if (length(mags) > rings) {
+   keep_idx <- unique(as.integer(round_half_up(seq(1, length(mags), length.out = rings))))
+   mags <- mags[keep_idx]
 }
   
   # If rounding collapsed values (rare), top up with missing integers
