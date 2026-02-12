@@ -132,32 +132,51 @@ make_primaries_secondaries <- function() {
   ) |> unique_rgb_dt()
 }
 
-# Off-grey rings: for each neutral v, for each ring magnitude, generate +/- axis offsets
-make_offgrey_rings <- function(neutrals_dt, rings=2L, delta_max=12L) {
+# Off-grey rings (density-based): for each neutral v, for each ring magnitude, generate +/- axis offsets
+# total_colors: FINAL chromatic target (after siblings) -> used to estimate sampling density
+make_offgrey_rings <- function(neutrals_dt, rings = 2L, total_colors = 6000L) {
   rings <- as.integer(rings)
-  if (rings <= 0) return(data.table(R=integer(),G=integer(),B=integer()))
+  if (rings <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
   nd <- nrow(neutrals_dt)
-  if (nd == 0) return(data.table(R=integer(),G=integer(),B=integer()))
-
-  # magnitudes evenly spread
-  mags <- unique(clip255(round(seq(1, delta_max, length.out = rings))))
+  if (nd == 0) return(data.table(R=integer(), G=integer(), B=integer()))
+  
+  N <- max(1L, as.integer(total_colors))
+  
+  # Expected spacing scale in RGB codes (heuristic): ~255 / N^(1/3)
+  base <- round(255 / (N^(1/3)))
+  
+  # Density-based max radius, clamped. Ensures >= 3 so 3 rings stays meaningful.
+  delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
+  
+  # Magnitudes evenly spread from 1..delta_max; ensure unique + at least 'rings' if possible
+  mags <- as.integer(round(seq(1, delta_max, length.out = rings)))
+  mags <- sort(unique(pmax(1L, mags)))
+  
+  # If rounding collapsed values (rare), top up with missing integers
+  if (length(mags) < rings) {
+    missing <- setdiff(seq_len(delta_max), mags)
+    mags <- sort(c(mags, head(missing, rings - length(mags))))
+  }
+  
   dirs <- rbind(
-    c( 1,0,0), c(0, 1,0), c(0,0, 1),
-    c(-1,0,0), c(0,-1,0), c(0,0,-1)
+    c( 1, 0, 0), c(0,  1, 0), c(0, 0,  1),
+    c(-1, 0, 0), c(0, -1, 0), c(0, 0, -1)
   )
-
+  
   out <- vector("list", nd * length(mags) * nrow(dirs))
-  idx <- 1
+  idx <- 1L
+  
   for (i in seq_len(nd)) {
-    base <- as.integer(neutrals_dt[i, .(R,G,B)])
+    base_rgb <- as.integer(neutrals_dt[i, .(R, G, B)])
     for (m in mags) {
       for (d in seq_len(nrow(dirs))) {
-        rgb <- base + as.integer(dirs[d,] * m)
+        rgb <- base_rgb + as.integer(dirs[d,] * m)
         out[[idx]] <- data.table(R=clip255(rgb[1]), G=clip255(rgb[2]), B=clip255(rgb[3]))
-        idx <- idx + 1
+        idx <- idx + 1L
       }
     }
   }
+  
   unique(rbindlist(out))
 }
 
@@ -236,6 +255,112 @@ make_fill_poisson_oklab <- function(n_need, seed=12345, candidate_mult=6L, max_c
 
   sel_idx <- sel_idx[sel_idx > 0]
   fill <- cand[sel_idx, , drop=FALSE]
+  unique_rgb_dt(as.data.table(fill))
+}
+
+make_fill_poisson_oklab_balanced <- function(n_need,
+                                             seed = 12345,
+                                             n_bins = 10L,
+                                             bin_weights = c(2,4,7,10,13,15,15,13,11,11),  # <-- your tweak
+                                             candidate_mult = 10L,
+                                             max_candidates = 80000L) {
+  n_need <- as.integer(n_need)
+  if (n_need <= 0) return(data.table(R=integer(), G=integer(), B=integer()))
+  set.seed(as.integer(seed))
+  
+  # --- Generate candidates in LINEAR RGB (fixes "too many brights") ---
+  n_cand <- min(as.integer(max_candidates), as.integer(n_need * candidate_mult))
+  n_cand <- max(n_cand, 15000L)
+  
+  linear_to_srgb01 <- function(u) {
+    ifelse(u <= 0.0031308, 12.92*u, 1.055*(u^(1/2.4)) - 0.055)
+  }
+  
+  lin <- matrix(runif(n_cand * 3L), ncol = 3L)
+  srgb01 <- linear_to_srgb01(lin)
+  cand <- clip255(round(srgb01 * 255))
+  
+  cand_dt <- unique_rgb_dt(as.data.table(cand))
+  cand <- as.matrix(cand_dt[, .(R,G,B)])
+  
+  ok <- rgb255_to_oklab(cand)  # your existing converter
+  L <- ok[,1]                  # OKLab L ~ 0..1
+  
+  # --- Bin by lightness, allocate picks per bin ---
+  n_bins <- as.integer(n_bins)
+  if (length(bin_weights) != n_bins) stop("bin_weights length must equal n_bins")
+  
+  w <- bin_weights / sum(bin_weights)
+  
+  bin_id <- pmin(n_bins, pmax(1L, as.integer(floor(L * n_bins)) + 1L))
+  
+  n_per <- pmax(0L, as.integer(round(w * n_need)))
+  
+  # fix rounding drift to hit n_need exactly
+  diff <- n_need - sum(n_per)
+  if (diff != 0) {
+    order_bins <- order(abs((seq_len(n_bins) - 0.5) - n_bins/2))
+    k <- 1L
+    while (diff != 0) {
+      bi <- order_bins[k]
+      if (diff > 0) {
+        n_per[bi] <- n_per[bi] + 1L
+        diff <- diff - 1L
+      } else if (n_per[bi] > 0) {
+        n_per[bi] <- n_per[bi] - 1L
+        diff <- diff + 1L
+      }
+      k <- if (k == length(order_bins)) 1L else (k + 1L)
+    }
+  }
+  
+  # --- Greedy maximin selection inside a candidate subset ---
+  select_maximin <- function(idx, k) {
+    if (!length(idx) || k <= 0) return(integer())
+    k <- min(k, length(idx))
+    
+    sub_ok <- ok[idx, , drop=FALSE]
+    n <- nrow(sub_ok)
+    
+    sel <- rep(FALSE, n)
+    sel_i <- integer(k)
+    
+    sel_i[1] <- sample.int(n, 1)
+    sel[sel_i[1]] <- TRUE
+    
+    min_d2 <- rowSums((sub_ok - sub_ok[sel_i[1],])^2)
+    min_d2[sel] <- -Inf
+    
+    if (k >= 2) {
+      for (s in 2:k) {
+        j <- which.max(min_d2)
+        if (!is.finite(min_d2[j])) break
+        sel_i[s] <- j
+        sel[j] <- TRUE
+        
+        d2 <- rowSums((sub_ok - sub_ok[j,])^2)
+        min_d2 <- pmin(min_d2, d2)
+        min_d2[sel] <- -Inf
+      }
+    }
+    
+    idx[sel_i[sel_i > 0]]
+  }
+  
+  chosen <- integer()
+  
+  for (bi in seq_len(n_bins)) {
+    idx <- which(bin_id == bi)
+    chosen <- c(chosen, select_maximin(idx, n_per[bi]))
+  }
+  
+  # Top-up if bins were too small (rare)
+  if (length(chosen) < n_need) {
+    remaining <- setdiff(seq_len(nrow(cand)), chosen)
+    chosen <- c(chosen, select_maximin(remaining, n_need - length(chosen)))
+  }
+  
+  fill <- cand[chosen, , drop=FALSE]
   unique_rgb_dt(as.data.table(fill))
 }
 
@@ -527,7 +652,7 @@ server <- function(input, output, session) {
     ramps <- data.table(R=integer(),G=integer(),B=integer())
     if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k, gamma=2.2)
 
-    offgrey <- make_offgrey_rings(neutrals, rings=rings, delta_max=delta_max)
+    offgrey <- make_offgrey_rings(neutrals_dt, rings=input$offgrey_rings, total_colors=input$total_colors)
 
     mandatory <- unique(rbindlist(list(neutrals, primsec, ramps, offgrey)))
 
@@ -549,7 +674,7 @@ server <- function(input, output, session) {
       # generate only as many "root" colors as needed; siblings will be handled implicitly by root->triplet
       n_root <- if (isTRUE(input$add_siblings)) ceiling(n_need_final / 3) else n_need_final
       
-      root <- make_fill_poisson_oklab(n_root, seed = as.integer(input$seed) + 101, candidate_mult=6L, max_candidates=40000L)
+      root <- make_fill_poisson_oklab_balanced(n_root, seed = as.integer(input$seed) + 101, candidate_mult=6L, max_candidates=40000L)
       
       if (isTRUE(input$add_siblings)) {
         fill <- add_siblings(root)
@@ -568,7 +693,7 @@ server <- function(input, output, session) {
       need2 <- target_chromatic - nrow(chromatic)
       n_root2 <- if (isTRUE(input$add_siblings)) ceiling(need2 / 3) else need2
       
-      root2 <- make_fill_poisson_oklab(n_root2, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
+      root2 <- make_fill_poisson_oklab_balanced(n_root2, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
       extra <- if (isTRUE(input$add_siblings)) add_siblings(root2) else root2
       extra <- extra[!chromatic, on=.(R,G,B)]
       chromatic <- unique(rbindlist(list(chromatic, extra)))
@@ -579,7 +704,7 @@ server <- function(input, output, session) {
     while (nrow(chromatic) < target_chromatic && tries < 6) {
       tries <- tries + 1
       extra_need <- target_chromatic - nrow(chromatic)
-      extra <- make_fill_poisson_oklab(extra_need, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
+      extra <- make_fill_poisson_oklab_balanced(extra_need, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
       if (isTRUE(input$add_siblings)) extra <- add_siblings(extra)
       extra <- extra[!chromatic, on=.(R,G,B)]
       chromatic <- unique(rbindlist(list(chromatic, extra)))
