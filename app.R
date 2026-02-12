@@ -149,8 +149,16 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
   
   # Magnitudes evenly spread from 1..delta_max; ensure unique + at least 'rings' if possible
-  mags <- as.integer(round(seq(1, delta_max, length.out = rings)))
+  round_half_up <- function(x) floor(x + 0.5)
+
+  mags <- as.integer(round_half_up(seq(1, delta_max, length.out = rings)))
   mags <- sort(unique(pmax(1L, mags)))
+
+if (length(mags) < rings) {
+  # Fill in missing radii by evenly adding integers (still within 1..delta_max)
+  missing <- setdiff(seq_len(delta_max), mags)
+  mags <- sort(c(mags, head(missing, rings - length(mags))))
+}
   
   # If rounding collapsed values (rare), top up with missing integers
   if (length(mags) < rings) {
