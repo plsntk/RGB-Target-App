@@ -146,7 +146,7 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   base <- round(255 / (N^(1/3)))
   
   # Density-based max radius from expected RGB spacing, clamped to keep 3-ring output meaningful.
-  delta_max <- max(3L, min(30L, as.integer(round(base / 5))))
+  delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
   
   # Magnitudes evenly spread from 1..delta_max; ensure unique + at least 'rings' if possible
   mags <- as.integer(round(seq(1, delta_max, length.out = rings)))
