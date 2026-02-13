@@ -721,9 +721,6 @@ server <- function(input, output, session) {
     
     mandatory <- unique(rbindlist(list(neutrals, primsec, ramps, offgrey)))
     
-    # Apply siblings if enabled (mandatory too)
-    if (isTRUE(input$add_siblings)) mandatory <- add_siblings(mandatory)
-    
     # Build fill pool WITHOUT truncating mandatory
     target_chromatic <- as.integer(input$total_colors)
     
@@ -739,7 +736,6 @@ server <- function(input, output, session) {
     # Generate shell candidates (faces) and take what we can use
     shell_all <- make_shell_faces(k_face = 15L)
     
-    if (isTRUE(input$add_siblings)) shell_all <- add_siblings(shell_all)
     shell_all <- shell_all[!base, on=.(R,G,B)]
     
     # If shell_all is larger than needed, downsample deterministically
@@ -761,38 +757,41 @@ server <- function(input, output, session) {
       
       root <- make_fill_poisson_oklab_balanced(n_root, seed = as.integer(input$seed) + 101, candidate_mult=6L, max_candidates=40000L)
       
-      if (isTRUE(input$add_siblings)) {
-        fill <- add_siblings(root)
-      } else {
-        fill <- root
-      }
+      fill <- root  # keep roots only; siblings added once at the end
       
       fill <- fill[!base, on=.(R,G,B)]
     }
-    chromatic <- unique(rbindlist(list(base, fill)))
-    
-    # If still short, top-up similarly (same rule)
-    tries <- 0
-    while (nrow(chromatic) < target_chromatic && tries < 6) {
-      tries <- tries + 1
-      need2 <- target_chromatic - nrow(chromatic)
-      n_root2 <- if (isTRUE(input$add_siblings)) ceiling(need2 / 3) else need2
-      
-      root2 <- make_fill_poisson_oklab_balanced(n_root2, seed = as.integer(input$seed) + 101 + tries, candidate_mult=7L, max_candidates=50000L)
-      extra <- if (isTRUE(input$add_siblings)) add_siblings(root2) else root2
-      extra <- extra[!chromatic, on=.(R,G,B)]
-      chromatic <- unique(rbindlist(list(chromatic, extra)))
+    # --- ROOT set (no siblings yet) ---
+    roots <- unique(rbindlist(list(base, fill)))
+
+    # helper to expand siblings once for counting/output
+    expand_siblings_once <- function(roots_dt) {
+      if (!isTRUE(input$add_siblings)) return(unique_rgb_dt(roots_dt))
+      unique_rgb_dt(rbindlist(list(roots_dt, add_siblings(roots_dt))))
     }
-    
-    # If we still undershot because of dedupe/siblings collisions, top-up iteratively
+
+    chromatic <- expand_siblings_once(roots)
+
+    # Top-up until expanded chromatic reaches target (overshoot is fine)
     tries <- 0
-    while (nrow(chromatic) < target_chromatic && tries < 6) {
+    while (nrow(chromatic) < target_chromatic && tries < 8) {
       tries <- tries + 1
-      extra_need <- target_chromatic - nrow(chromatic)
-      extra <- make_fill_poisson_oklab_balanced(extra_need, seed = as.integer(input$seed) + 1101 + tries, candidate_mult=7L, max_candidates=50000L)
-      if (isTRUE(input$add_siblings)) extra <- add_siblings(extra)
-      extra <- extra[!chromatic, on=.(R,G,B)]
-      chromatic <- unique(rbindlist(list(chromatic, extra)))
+
+      need2 <- target_chromatic - nrow(chromatic)
+      # conservative: assume ~3x expansion
+      n_root2 <- if (isTRUE(input$add_siblings)) ceiling(need2 / 3) else need2
+
+      root2 <- make_fill_poisson_oklab_balanced(
+        n_root2,
+        seed = as.integer(input$seed) + 101 + tries,
+        candidate_mult = 7L,
+        max_candidates = 50000L
+      )
+
+      root2 <- root2[!roots, on=.(R,G,B)]
+      roots <- unique(rbindlist(list(roots, root2)))
+
+      chromatic <- expand_siblings_once(roots)
     }
     
     # We allow overshoot (keep it) as long as it fits in max_pages
