@@ -47,10 +47,28 @@ add_siblings <- function(dt) {
 
 # Linear-light steps mapped back to sRGB code values (prevents highlight bias)
 linear_steps_srgb <- function(k) {
+  k <- as.integer(k)
   if (k <= 1) return(0L)
-  t <- seq(0, 1, length.out = k)          # linear light
+
+  # Oversample so rounding doesn't collapse unique values
+  m <- max(2048L, as.integer(k * 64L))
+  t <- seq(0, 1, length.out = m)
+
+  # linear -> sRGB
   srgb01 <- ifelse(t <= 0.0031308, 12.92*t, 1.055*(t^(1/2.4)) - 0.055)
-  clip255(unique(as.integer(round(255 * srgb01))))
+  v <- unique(clip255(as.integer(round(255 * srgb01))))
+  v <- sort(unique(v))
+
+  # Force extra dark anchors (prevents "first neutral is 49" nonsense)
+  dark_anchors <- unique(c(0L, seq(4L, 64L, by=4L), 255L))
+  v <- sort(unique(c(v, dark_anchors)))
+
+  # If still not enough unique values (unlikely), fall back to full range
+  if (length(v) < k) v <- sort(unique(c(v, 0:255)))
+
+  # Now pick exactly k values evenly across index space
+  idx <- unique(as.integer(round(seq(1, length(v), length.out = k))))
+  v[idx]
 }
 
 # -------------------- OKLab conversion --------------------
