@@ -38,12 +38,12 @@ add_siblings <- function(dt) {
 }
 
 # Gamma-spaced steps including endpoints, unique, length may be <= k if rounding collides (acceptable)
-gamma_steps <- function(k, gamma=2.2) {
-  if (k <= 1) return(0L)
-  t <- seq(0, 1, length.out = k)
-  v <- round(255 * (t^(1/gamma)))
-  clip255(unique(v))
-}
+#gamma_steps <- function(k, gamma=2.2) {
+#  if (k <= 1) return(0L)
+#  t <- seq(0, 1, length.out = k)
+#  v <- round(255 * (t^(1/gamma)))
+#  clip255(unique(v))
+#}
 
 # Linear-light steps mapped back to sRGB code values (prevents highlight bias)
 linear_steps_srgb <- function(k) {
@@ -65,29 +65,29 @@ rgb255_to_oklab <- function(rgb) {
   rgb <- as.matrix(rgb)
   if (is.null(dim(rgb))) rgb <- matrix(rgb, ncol = 3, byrow = TRUE)
   if (ncol(rgb) != 3) stop("rgb255_to_oklab expects Nx3 input")
-
+  
   rgb01 <- rgb / 255
   # clamp without dropping dimensions
   rgb01[rgb01 < 0] <- 0
   rgb01[rgb01 > 1] <- 1
-
+  
   r <- srgb_to_linear(rgb01[,1])
   g <- srgb_to_linear(rgb01[,2])
   b <- srgb_to_linear(rgb01[,3])
-
+  
   # linear sRGB -> LMS
   l <- 0.4122214708*r + 0.5363325363*g + 0.0514459929*b
   m <- 0.2119034982*r + 0.6806995451*g + 0.1073969566*b
   s <- 0.0883024619*r + 0.2817188376*g + 0.6299787005*b
-
+  
   l_ <- l^(1/3)
   m_ <- m^(1/3)
   s_ <- s^(1/3)
-
+  
   L <- 0.2104542553*l_ + 0.7936177850*m_ - 0.0040720468*s_
   A <- 1.9779984951*l_ - 2.4285922050*m_ + 0.4505937099*s_
   B <- 0.0259040371*l_ + 0.7827717662*m_ - 0.8086757660*s_
-
+  
   cbind(L, A, B)
 }
 
@@ -100,7 +100,7 @@ make_neutrals <- function(k) {
 
 make_hue_ramps <- function(k) {
   # ramps with k-ish steps (unique rounding allowed)
-  v <- linear_steps_srgb(k) / 255 / 255  # 0..1
+  v <- linear_steps_srgb(k) / 255  # 0..1
   hues <- list(
     R = c(255,   0,   0),
     G = c(  0, 255,   0),
@@ -109,21 +109,21 @@ make_hue_ramps <- function(k) {
     M = c(255,   0, 255),
     Y = c(255, 255,   0)
   )
-
+  
   out <- list()
   for (h in hues) {
     h <- as.numeric(h)
-
+    
     # shade: black -> hue
     shade <- cbind(h[1]*v, h[2]*v, h[3]*v)
-
+    
     # tint: white -> hue
     tint <- cbind(
       255 + (h[1]-255)*v,
       255 + (h[2]-255)*v,
       255 + (h[3]-255)*v
     )
-
+    
     out[[length(out)+1]] <- as.data.table(shade)
     out[[length(out)+1]] <- as.data.table(tint)
   }
@@ -174,27 +174,27 @@ make_offgrey_rings <- function(neutrals, rings = 2L, total_colors = 6000L) {
   delta_max <- max(3L, min(30L, as.integer(round(2 * base))))
   
   round_half_up <- function(x) floor(x + 0.5)
-
+  
   # Start with evenly spaced radii
   mags <- as.integer(round_half_up(seq(1, delta_max, length.out = rings)))
   mags <- sort(unique(pmax(1L, mags)))
-
+  
   # Force include endpoints (helps for small ring counts)
   mags <- sort(unique(c(1L, mags, delta_max)))
-
+  
   # If we still have fewer than 'rings' distinct values, fill with missing ints
   if (length(mags) < rings) {
     missing <- setdiff(seq_len(delta_max), mags)
     mags <- sort(c(mags, head(missing, rings - length(mags))))
   }
-
+  
   # If we have more than 'rings' (can happen after forcing endpoints), thin evenly
   if (length(mags) > rings) {
-   keep_idx <- unique(as.integer(round_half_up(seq(1, length(mags), length.out = rings))))
-   mags <- mags[keep_idx]
-}
+    keep_idx <- unique(as.integer(round_half_up(seq(1, length(mags), length.out = rings))))
+    mags <- mags[keep_idx]
+  }
   
-dirs <- rbind(
+  dirs <- rbind(
     c( 1, 0, 0), c(0,  1, 0), c(0, 0,  1),
     c(-1, 0, 0), c(0, -1, 0), c(0, 0, -1)
   )
@@ -228,11 +228,11 @@ make_fill_poisson_oklab <- function(n_need, seed=12345, candidate_mult=6L, max_c
   n_need <- as.integer(n_need)
   if (n_need <= 0) return(data.table(R=integer(),G=integer(),B=integer()))
   set.seed(as.integer(seed))
-
+  
   # Candidate count
   n_cand <- min(as.integer(max_candidates), as.integer(n_need * candidate_mult))
   n_cand <- max(n_cand, min(5000L, max_candidates))
-
+  
   # Build candidates: mix of jittered grid and random
   # jittered grid
   m <- ceiling(n_cand^(1/3))
@@ -244,13 +244,13 @@ make_fill_poisson_oklab <- function(n_need, seed=12345, candidate_mult=6L, max_c
   j <- (((idxs - 1) %/% m) %% m) + 1
   k <- ((idxs - 1) %/% (m*m)) + 1
   cand <- cbind(grid_vals[i], grid_vals[j], grid_vals[k])
-
+  
   # add jitter
   jitter <- matrix(runif(nrow(cand)*3, -0.45, 0.45), ncol=3)
   step <- if (m > 1) 255/(m-1) else 255
   cand <- cand + jitter * step
   cand <- clip255(cand)
-
+  
   # ensure uniqueness
   cand_dt <- unique_rgb_dt(as.data.table(cand))
   cand <- as.matrix(cand_dt[, .(R,G,B)])
@@ -263,34 +263,34 @@ make_fill_poisson_oklab <- function(n_need, seed=12345, candidate_mult=6L, max_c
     cand <- as.matrix(cand_dt[, .(R,G,B)])
     n_cand <- nrow(cand)
   }
-
+  
   ok <- rgb255_to_oklab(cand)
-
+  
   # Greedy maximin (maximise distance to nearest selected), without re-selecting the same candidate
   n_need <- min(n_need, n_cand)
   sel_idx <- integer(n_need)
   sel <- rep(FALSE, n_cand)
-
+  
   sel_idx[1] <- sample.int(n_cand, 1)
   sel[sel_idx[1]] <- TRUE
-
+  
   min_d2 <- rowSums((ok - ok[sel_idx[1],])^2)
   min_d2[sel] <- -Inf
-
+  
   if (n_need >= 2) {
     for (s in 2:n_need) {
       jmax <- which.max(min_d2)
       if (!is.finite(min_d2[jmax])) break
-
+      
       sel_idx[s] <- jmax
       sel[jmax] <- TRUE
-
+      
       d2 <- rowSums((ok - ok[jmax,])^2)
       min_d2 <- pmin(min_d2, d2)
       min_d2[sel] <- -Inf
     }
   }
-
+  
   sel_idx <- sel_idx[sel_idx > 0]
   fill <- cand[sel_idx, , drop=FALSE]
   unique_rgb_dt(as.data.table(fill))
@@ -299,7 +299,7 @@ make_fill_poisson_oklab <- function(n_need, seed=12345, candidate_mult=6L, max_c
 make_fill_poisson_oklab_balanced <- function(n_need,
                                              seed = 12345,
                                              n_bins = 10L,
-                                             bin_weights = c(2,4,7,10,13,15,15,13,11,11),  # <-- your tweak
+                                             bin_weights = c(9,10,11,12,13,15,15,13,11,11),  # <-- your tweak
                                              candidate_mult = 10L,
                                              max_candidates = 80000L) {
   n_need <- as.integer(n_need)
@@ -314,7 +314,16 @@ make_fill_poisson_oklab_balanced <- function(n_need,
     ifelse(u <= 0.0031308, 12.92*u, 1.055*(u^(1/2.4)) - 0.055)
   }
   
-  lin <- matrix(runif(n_cand * 3L), ncol = 3L)
+  # Mix candidates: some uniform, some biased dark (u^p with p>1)
+  p_dark <- 2.2
+  n1 <- as.integer(round(0.55 * n_cand))   # uniform share
+  n2 <- n_cand - n1                        # dark-biased share
+  
+  lin1 <- matrix(runif(n1 * 3L), ncol=3L)
+  lin2 <- matrix(runif(n2 * 3L)^p_dark, ncol=3L)   # biases toward 0 in linear light
+  
+  lin <- rbind(lin1, lin2)
+  
   srgb01 <- linear_to_srgb01(lin)
   cand <- clip255(round(srgb01 * 255))
   
@@ -419,24 +428,24 @@ compute_grid_paged <- function(page_w_mm, page_h_mm,
   usable_w_mm <- min(max_chart_w_mm, page_w_mm - 2 * margin_side_mm)
   usable_h_mm <- page_h_mm - margin_leading_mm - margin_trailing_mm
   pitch_mm <- patch_mm + gap_mm
-
+  
   cols <- max(1L, floor((usable_w_mm + gap_mm) / pitch_mm))
   max_rows_fit <- max(1L, floor((usable_h_mm + gap_mm) / pitch_mm))
-
+  
   total_rows_needed <- as.integer(ceiling(n_patches / cols))
   pages_needed <- as.integer(ceiling(total_rows_needed / max_rows_fit))
   pages <- max(1L, min(as.integer(max_pages), pages_needed))
-
+  
   if (pages_needed > max_pages) {
     # won't fit without more pages
     return(list(fits=FALSE, cols=cols, max_rows_fit=max_rows_fit, pages_needed=pages_needed))
   }
-
+  
   rows_per_page <- as.integer(ceiling(total_rows_needed / pages))
   rows_per_page <- min(rows_per_page, max_rows_fit)
-
+  
   total_capacity <- cols * rows_per_page * pages
-
+  
   list(
     fits=TRUE,
     cols=cols,
@@ -595,15 +604,15 @@ write_tiff_pages_forced <- function(dt, out_dir,
   top_px    <- mm_to_px(margin_top_mm)
   trailing_px <- mm_to_px(margin_trailing_mm)
   y_limit <- page_h_px - trailing_px
-
+  
   per_page <- cols * rows_per_page
-
+  
   files <- character(pages)
   for (p in seq_len(pages)) {
     start <- (p-1)*per_page + 1
     end <- p*per_page
     sub <- dt[start:end]
-
+    
     img <- array(255L, dim=c(page_h_px, page_w_px, 3))
     idx <- 1
     for (r in seq_len(rows_per_page)) {
@@ -612,14 +621,14 @@ write_tiff_pages_forced <- function(dt, out_dir,
         y <- top_px  + (r-1)*(patch_px + gap_px) + 1
         x1 <- min(page_w_px, x + patch_px - 1)
         y1 <- min(y_limit,  y + patch_px - 1)
-
+        
         img[y:y1, x:x1, 1] <- as.integer(sub$R[idx])
         img[y:y1, x:x1, 2] <- as.integer(sub$G[idx])
         img[y:y1, x:x1, 3] <- as.integer(sub$B[idx])
         idx <- idx + 1
       }
     }
-
+    
     fname <- sprintf("%s%03d.tif", filename_prefix, p)
     fpath <- file.path(out_dir, fname)
     writeTIFF(img/255, fpath, compression="none")
@@ -637,17 +646,17 @@ ui <- fluidPage(
       numericInput("total_colors", "Chromatic target colors (final after siblings; before WB/pad)", value = 6000, min = 4000, max = 12000, step = 100),
       numericInput("neutral_steps", "Neutral greys count (R=G=B)", value = 33, min = 5, max = 256, step = 1),
       numericInput("offgrey_rings", "Off-grey ring count around neutral axis", value = 2, min = 0, max = 8, step = 1),
-
+      
       checkboxInput("use_hue_ramps", "Include primary/secondary ramps (tint+shade)", value = TRUE),
       checkboxInput("add_siblings", "Add siblings (RGB cyclic permutations)", value = TRUE),
-
+      
       tags$hr(),
       numericInput("wb_repeats_each", "Extra white patches AND extra black patches (each)", value = 24, min = 0, max = 5000, step = 1),
-
+      
       tags$hr(),
       numericInput("seed", "Seed (reproducible)", value = 12345, min = 1, max = 9999999, step = 1),
       selectInput("pad_mode", "Padding color", choices = c("alternate"="alternate","white"="white","black"="black"), selected = "alternate"),
-
+      
       tags$hr(),
       numericInput("max_pages", "Max pages allowed", value = 3, min = 1, max = 50, step = 1),
       numericInput("dpi", "TIFF DPI", value = 300, min = 150, max = 600, step = 10),
@@ -659,7 +668,7 @@ ui <- fluidPage(
       ),
       numericInput("patch_mm", "Patch size (mm)", value = 6, min = 6, max = 30, step = 1),
       numericInput("gap_mm", "Gap (mm)", value = 1, min = 0, max = 5, step = 1),
-
+      
       tags$hr(),
       downloadButton("download_zip", "Download ZIP (MYIRO XML + TIFF pages + CGATS + CSV)")
     ),
@@ -671,63 +680,63 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
-
+  
   # Core generation: returns a list with dt (print order, padded), gridp, and base stats
   generated <- reactive({
-
+    
     set.seed(as.integer(input$seed))
-
+    
     k <- as.integer(input$neutral_steps)
     rings <- as.integer(input$offgrey_rings)
-
+    
     neutrals <- make_neutrals(k)
     primsec <- make_primaries_secondaries()
     ramps <- data.table(R=integer(),G=integer(),B=integer())
     if (isTRUE(input$use_hue_ramps)) ramps <- make_hue_ramps(k)
-
+    
     offgrey <- make_offgrey_rings(
       neutrals,
       rings = input$offgrey_rings,
       total_colors = input$total_colors
     )
     delta_max_used <- attr(offgrey, "delta_max_used")
-
+    
     mandatory <- unique(rbindlist(list(neutrals, primsec, ramps, offgrey)))
-
+    
     # Apply siblings if enabled (mandatory too)
     if (isTRUE(input$add_siblings)) mandatory <- add_siblings(mandatory)
-
+    
     # Build fill pool WITHOUT truncating mandatory
     target_chromatic <- as.integer(input$total_colors)
-
+    
     # If mandatory already exceeds target, we KEEP it (quality > arbitrary count),
     # but we will still enforce max_pages via paging.
-base <- mandatory
-
-# --- Shell budget (fixed percentage) ---
-shell_pct <- 0.20  # 20% of target goes to shell
-target_chromatic <- as.integer(input$total_colors)
-target_shell <- as.integer(round(shell_pct * target_chromatic))
-
-# Generate shell candidates (faces) and take what we can use
-shell_all <- make_shell_faces(k_face = 15L)
-
-if (isTRUE(input$add_siblings)) shell_all <- add_siblings(shell_all)
-shell_all <- shell_all[!base, on=.(R,G,B)]
-
-# If shell_all is larger than needed, downsample deterministically
-if (nrow(shell_all) > target_shell) {
-  set.seed(as.integer(input$seed) + 77)
-  shell_all <- shell_all[sample.int(nrow(shell_all), target_shell)]
-}
-
-base <- unique(rbindlist(list(base, shell_all)))
-n_base <- nrow(base)
-
-# Remaining budget becomes volumetric fill
-n_need_final <- max(0L, target_chromatic - n_base)
-
-fill <- data.table(R=integer(),G=integer(),B=integer())
+    base <- mandatory
+    
+    # --- Shell budget (fixed percentage) ---
+    shell_pct <- 0.20  # 20% of target goes to shell
+    target_chromatic <- as.integer(input$total_colors)
+    target_shell <- as.integer(round(shell_pct * target_chromatic))
+    
+    # Generate shell candidates (faces) and take what we can use
+    shell_all <- make_shell_faces(k_face = 15L)
+    
+    if (isTRUE(input$add_siblings)) shell_all <- add_siblings(shell_all)
+    shell_all <- shell_all[!base, on=.(R,G,B)]
+    
+    # If shell_all is larger than needed, downsample deterministically
+    if (nrow(shell_all) > target_shell) {
+      set.seed(as.integer(input$seed) + 77)
+      shell_all <- shell_all[sample.int(nrow(shell_all), target_shell)]
+    }
+    
+    base <- unique(rbindlist(list(base, shell_all)))
+    n_base <- nrow(base)
+    
+    # Remaining budget becomes volumetric fill
+    n_need_final <- max(0L, target_chromatic - n_base)
+    
+    fill <- data.table(R=integer(),G=integer(),B=integer())
     if (n_need_final > 0) {
       # generate only as many "root" colors as needed; siblings will be handled implicitly by root->triplet
       n_root <- if (isTRUE(input$add_siblings)) ceiling(n_need_final / 3) else n_need_final
@@ -756,7 +765,7 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
       extra <- extra[!chromatic, on=.(R,G,B)]
       chromatic <- unique(rbindlist(list(chromatic, extra)))
     }
-
+    
     # If we still undershot because of dedupe/siblings collisions, top-up iteratively
     tries <- 0
     while (nrow(chromatic) < target_chromatic && tries < 6) {
@@ -767,25 +776,25 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
       extra <- extra[!chromatic, on=.(R,G,B)]
       chromatic <- unique(rbindlist(list(chromatic, extra)))
     }
-
+    
     # We allow overshoot (keep it) as long as it fits in max_pages
     # Add repeated white/black measurements AFTER chromatic selection
     dt <- copy(chromatic)
     dt <- add_white_black_repeats(dt, input$wb_repeats_each)
-
+    
     # Scramble print order to counter drift
     set.seed(as.integer(input$seed))
     dt <- dt[sample.int(nrow(dt))]
-
+    
     # Paging / capacity
     pg <- get_page_mm(input$paper, input$page_w_mm, input$page_h_mm)
-
+    
     # MYIRO scan margin handling: we reserve a safe left/top margin for grid placement.
     # (Keep your FD-S2w-like minimums; adjust if your MYIROtools template expects different.)
     margin_side_mm <- 4
     margin_top_mm <- 23
     margin_trailing_mm <- 33
-
+    
     gridp <- compute_grid_paged(
       page_w_mm = pg$w,
       page_h_mm = pg$h,
@@ -798,15 +807,15 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
       n_patches = nrow(dt),
       max_pages = as.integer(input$max_pages)
     )
-
+    
     if (!isTRUE(gridp$fits)) {
       stop(sprintf("Does not fit within max_pages=%d. Need at least %d pages with current patch/gap and margins.",
                    as.integer(input$max_pages), as.integer(gridp$pages_needed)))
     }
-
+    
     # If there is spare capacity within max_pages, keep overshoot; then pad to full capacity
     dt <- pad_to_capacity(dt, capacity = gridp$total_capacity, mode = input$pad_mode)
-
+    
     # Return final
     list(
       dt = dt,
@@ -817,7 +826,7 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
       chromatic_count = nrow(chromatic)
     )
   })
-
+  
   output$stats <- renderPrint({
     g <- generated()
     dt <- g$dt
@@ -826,18 +835,18 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
     cat("Mandatory set size:", g$mandatory_count, "\n")
     cat("Printed patches (incl WB repeats + padding):", nrow(dt), "\n")
     cat("Off-grey delta_max used:", g$delta_max, "\n\n")
-
+    
     cat("Page (mm):", g$pg$w, "x", g$pg$h, "\n")
     cat("Grid:", gridp$cols, "cols x", gridp$rows_per_page, "rows/page x", gridp$pages, "pages\n")
     cat("Capacity:", gridp$total_capacity, "patches\n\n")
-
+    
     print(dt[, .(R_min=min(R), R_max=max(R), G_min=min(G), G_max=max(G), B_min=min(B), B_max=max(B))])
   })
-
+  
   output$preview <- renderTable({
     head(generated()$dt, 30)
   })
-
+  
   output$download_zip <- downloadHandler(
     filename = function() "rgb_target_myiro.zip",
     content = function(file) {
@@ -845,19 +854,19 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
       dt <- g$dt
       gridp <- g$gridp
       pg <- g$pg
-
+      
       tmpdir <- tempdir()
       outdir <- file.path(tmpdir, paste0("target_", as.integer(Sys.time())))
       dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
-
+      
       # outputs
       csv_path   <- file.path(outdir, "colors_print_order.csv")
       cgats_path <- file.path(outdir, "target.cgats.txt")
       xml_path   <- file.path(outdir, "chart_definition.xml")
-
+      
       fwrite(dt, csv_path)
       write_cgats_rgb(dt, cgats_path, title = "RGB_Target_PrintOrder")
-
+      
       # MYIRO XML:
       write_myiro_chart_xml(
         dt = dt,
@@ -873,7 +882,7 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
         margin_top_mm = 23,
         title = "RGB Target"
       )
-
+      
       # TIFF pages (forced to same grid)
       tiff_files <- write_tiff_pages_forced(
         dt = dt, out_dir = outdir,
@@ -889,7 +898,7 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
         pages = gridp$pages,
         filename_prefix = "pages_"
       )
-
+      
       manifest <- file.path(outdir, "manifest.txt")
       writeLines(c(
         paste0("chromatic_count=", g$chromatic_count),
@@ -907,7 +916,7 @@ fill <- data.table(R=integer(),G=integer(),B=integer())
         paste0("wb_repeats_each=", input$wb_repeats_each),
         paste0("pad_mode=", input$pad_mode)
       ), manifest, useBytes = TRUE)
-
+      
       files_abs <- list.files(outdir, full.names = TRUE)
       zip::zipr(zipfile = file, files = files_abs)
     }
