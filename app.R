@@ -689,25 +689,35 @@ write_tiff_pages_forced <- function(dt, out_dir,
     fpath <- file.path(out_dir, fname)
     # Write TIFF with DPI tags (Photoshop otherwise shows 72 DPI)
     ok <- FALSE
-    try({
-      writeTIFF(img/255, fpath, compression="none",
-                XResolution = as.numeric(dpi),
-                YResolution = as.numeric(dpi),
-                ResolutionUnit = 2L)  # inches
-      ok <- TRUE
-    }, silent = TRUE)
+    # Prefer magick for reliable DPI metadata (Photoshop etc.)
+if (requireNamespace("magick", quietly = TRUE)) {
+  # img is uint8 array [H,W,3]; convert to raster then set density
+  im <- magick::image_read(as.raster(img / 255))
+  im <- magick::image_density(im, paste0(as.integer(dpi)))
+  magick::image_write(im, path = fpath, format = "tiff", compression = "None")
+} else {
+  # Fallback: try to write DPI tags via tiff::writeTIFF
+  ok <- FALSE
+  try({
+    writeTIFF(img/255, fpath, compression="none",
+              XResolution = as.numeric(dpi),
+              YResolution = as.numeric(dpi),
+              ResolutionUnit = 2L)  # inches
+    ok <- TRUE
+  }, silent = TRUE)
 
-    if (!ok) try({
-      writeTIFF(img/255, fpath, compression="none",
-                xresolution = as.numeric(dpi),
-                yresolution = as.numeric(dpi),
-                resolutionunit = 2L)
-      ok <- TRUE
-    }, silent = TRUE)
-    
-    if (!ok) {
-      writeTIFF(img/255, fpath, compression="none")
-    }
+  if (!ok) try({
+    writeTIFF(img/255, fpath, compression="none",
+              xresolution = as.numeric(dpi),
+              yresolution = as.numeric(dpi),
+              resolutionunit = 2L)
+    ok <- TRUE
+  }, silent = TRUE)
+
+  if (!ok) {
+    writeTIFF(img/255, fpath, compression="none")
+  }
+}
         files[p] <- fpath
       }
       files
