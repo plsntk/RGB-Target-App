@@ -690,12 +690,18 @@ write_tiff_pages_forced <- function(dt, out_dir,
     # Write TIFF with DPI tags (Photoshop otherwise shows 72 DPI)
     ok <- FALSE
     # Prefer magick for reliable DPI metadata (Photoshop etc.)
-if (requireNamespace("magick", quietly = TRUE)) {
-  # img is uint8 array [H,W,3]; convert to raster then set density
-  im <- magick::image_read(as.raster(img / 255))
-  im <- magick::image_density(im, paste0(as.integer(dpi)))
-  magick::image_write(im, path = fpath, format = "tiff", compression = "None")
-} else {
+  if (requireNamespace("magick", quietly = TRUE)) {
+    im <- magick::image_read(as.raster(img / 255))
+
+    # Set density via write options (works on older magick versions)
+    magick::image_write(
+      im,
+      path = fpath,
+      format = "tiff",
+      compression = "None",
+      density = paste0(as.integer(dpi))
+    )
+  } else {
   # Fallback: try to write DPI tags via tiff::writeTIFF
   ok <- FALSE
   try({
