@@ -440,10 +440,13 @@ get_page_mm <- function(paper, page_w_mm, page_h_mm) {
 compute_grid_paged <- function(page_w_mm, page_h_mm,
                                patch_mm, gap_mm,
                                margin_side_mm, margin_leading_mm, margin_trailing_mm,
-                               max_chart_w_mm = 300,
+                               max_chart_w_mm = Inf,
                                n_patches,
                                max_pages = 3L) {
-  usable_w_mm <- min(max_chart_w_mm, page_w_mm - 2 * margin_side_mm)
+  usable_w_mm <- page_w_mm - 2 * margin_side_mm
+  if (is.finite(max_chart_w_mm)) {
+    usable_w_mm <- min(usable_w_mm, max_chart_w_mm)
+  }
   usable_h_mm <- page_h_mm - margin_leading_mm - margin_trailing_mm
   pitch_mm <- patch_mm + gap_mm
   
@@ -606,6 +609,38 @@ write_myiro_chart_xml <- function(dt, path,
   writeLines(lines, con = path, useBytes = TRUE)
 }
 
+draw_page_blocks <- function(img, page_i, dpi, y_from_bottom_mm = 10,
+                             block_w_mm = 6, block_h_mm = 2, gap_mm = 2) {
+  mm_to_px <- function(mm) as.integer(round(mm * dpi / 25.4))
+  h <- dim(img)[1]; w <- dim(img)[2]
+
+  bh <- mm_to_px(block_h_mm)
+  bw <- mm_to_px(block_w_mm)
+  gp <- mm_to_px(gap_mm)
+
+  y2 <- h - mm_to_px(y_from_bottom_mm)
+  y1 <- max(1L, y2 - bh + 1L)
+  y2 <- min(h, y2)
+
+  n <- as.integer(page_i)
+  total_w <- n * bw + (n - 1L) * gp
+  x_center <- as.integer(round(w / 2))
+  x_start <- x_center - as.integer(round(total_w / 2))
+
+  for (k in seq_len(n)) {
+    x1 <- x_start + (k - 1L) * (bw + gp)
+    x2 <- x1 + bw - 1L
+    if (x2 < 1L || x1 > w) next
+    x1 <- max(1L, x1); x2 <- min(w, x2)
+
+    img[y1:y2, x1:x2, 1] <- 0L
+    img[y1:y2, x1:x2, 2] <- 0L
+    img[y1:y2, x1:x2, 3] <- 0L
+  }
+
+  img
+}
+
 write_tiff_pages_forced <- function(dt, out_dir,
                                     page_w_mm, page_h_mm,
                                     dpi,
@@ -646,13 +681,36 @@ write_tiff_pages_forced <- function(dt, out_dir,
         idx <- idx + 1
       }
     }
+
+    # Page counter blocks (1 block on page 1, 2 blocks on page 2, ...)
+    img <- draw_page_blocks(img, page_i = p, dpi = dpi)
     
     fname <- sprintf("%s%03d.tif", filename_prefix, p)
     fpath <- file.path(out_dir, fname)
-    writeTIFF(img/255, fpath, compression="none")
-    files[p] <- fpath
-  }
-  files
+    # Write TIFF with DPI tags (Photoshop otherwise shows 72 DPI)
+    ok <- FALSE
+    try({
+      writeTIFF(img/255, fpath, compression="none",
+                XResolution = as.numeric(dpi),
+                YResolution = as.numeric(dpi),
+                ResolutionUnit = 2L)  # inches
+      ok <- TRUE
+    }, silent = TRUE)
+
+    if (!ok) try({
+      writeTIFF(img/255, fpath, compression="none",
+                xresolution = as.numeric(dpi),
+                yresolution = as.numeric(dpi),
+                resolutionunit = 2L)
+      ok <- TRUE
+    }, silent = TRUE)
+    
+    if (!ok) {
+      writeTIFF(img/255, fpath, compression="none")
+    }
+        files[p] <- fpath
+      }
+      files
 }
 
 # -------------------- app --------------------
@@ -820,7 +878,7 @@ server <- function(input, output, session) {
       margin_side_mm = margin_side_mm,
       margin_leading_mm = margin_top_mm,
       margin_trailing_mm = margin_trailing_mm,
-      max_chart_w_mm = 300,
+      max_chart_w_mm = Inf,
       n_patches = nrow(dt),
       max_pages = as.integer(input$max_pages)
     )
@@ -883,6 +941,9 @@ server <- function(input, output, session) {
       
       fwrite(dt, csv_path)
       write_cgats_rgb(dt, cgats_path, title = "RGB_Target_PrintOrder")
+
+      used_w_mm <- gridp$cols * as.integer(input$patch_mm) + (gridp$cols - 1L) * as.integer(input$gap_mm)
+      margin_left_mm <- max(4, (pg$w - used_w_mm) / 2)  # keep at least 4mm, otherwise center
       
       # MYIRO XML:
       write_myiro_chart_xml(
@@ -895,7 +956,7 @@ server <- function(input, output, session) {
         pages = gridp$pages,
         patch_mm = as.integer(input$patch_mm),
         gap_mm = as.integer(input$gap_mm),
-        margin_left_mm = 4,
+        margin_left_mm = margin_left_mm,
         margin_top_mm = 23,
         title = "RGB Target"
       )
@@ -907,7 +968,7 @@ server <- function(input, output, session) {
         dpi = as.integer(input$dpi),
         patch_mm = as.integer(input$patch_mm),
         gap_mm = as.integer(input$gap_mm),
-        margin_left_mm = 4,
+        margin_left_mm = margin_left_mm,
         margin_top_mm = 23,
         margin_trailing_mm = 33,
         cols = gridp$cols,
